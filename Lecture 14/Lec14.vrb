@@ -1,0 +1,32 @@
+\frametitle{JAGS Model}
+
+\scriptoutput
+
+\begin{verbatim}
+## model{
+##   y ~ dmnorm(mu, inverse(Sigma))
+##
+##   for (i in 1:N) {
+##     mu[i] = beta[1]+ beta[2] * x[i] + beta[3] * x[i]^2
+##   }
+##
+##   for (i in 1:(N-1)) {
+##     for (j in (i+1):N) {
+##       Sigma[i,j] = sigma2 * exp(- pow(l*d[i,j],2))
+##       Sigma[j,i] = Sigma[i,j]
+##     }
+##   }
+##
+##   for (k in 1:N) {
+##     Sigma[k,k] = sigma2 + sigma2_w
+##   }
+##
+##   for (i in 1:3) {
+##     beta[i] ~ dt(0, 2.5, 1)
+##   }
+##   sigma2_w ~ dnorm(10, 1/25) T(0,)
+##   sigma2   ~ dnorm(10, 1/25) T(0,)
+##   l        ~ dt(0, 2.5, 1) T(0,)
+## }
+\end{verbatim}
+

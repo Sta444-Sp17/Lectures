@@ -1,0 +1,623 @@
+
+---
+title: "Lecture 10" 
+subtitle: "Forecasting and Model Fitting"
+author: "Colin Rundel"
+date: "02/20/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 6
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE)
+options(width=70)
+
+set.seed(20170220)
+
+library(magrittr)
+library(dplyr)
+library(modelr)
+library(ggplot2)
+library(tidyr)
+library(rjags)
+library(stringr)
+library(gridExtra)
+library(readr)
+library(purrr)
+library(forcats)
+library(forecast)
+
+theme_set(
+  theme_bw()  
+)
+
+get_coda_parameter = function(coda, pattern)
+{
+  w = coda[[1]] %>% colnames() %>% str_detect(pattern)
+  coda[[1]][,w,drop=FALSE]
+}
+
+post_summary = function(m, ci_width=0.95)
+{
+  d = data_frame(
+    post_mean  = apply(m, 2, mean),
+    post_lower = apply(m, 2, quantile, probs=(1-ci_width)/2),
+    post_upper = apply(m, 2, quantile, probs=1 - (1-ci_width)/2)
+  )
+  rownames(d) = colnames(m)
+  d
+}
+
+strip_attrs = function(obj)
+{
+  attributes(obj) = NULL
+  obj
+}
+
+strip_class = function(obj)
+{
+  attr(obj,"class") = NULL
+  obj
+}
+```
+
+# Forecasting
+
+## Forecasting ARMA {.t}
+
+* Forecasts for stationary models necessarily revert to mean 
+
+    * Remember, $E(y_t) \ne \delta$ but rather $\delta / (1 - \sum_{i=1}^p \phi_i)$.
+  
+    * Differenced models revert to trend (usually a line)
+    
+    * Why? AR gradually damp out, MA terms disappear
+  
+* Like any other model, accuracy decreases as we extrapolate / prediction interval increases
+
+
+## One step ahead forecasting {.t}
+
+Take a fitted ARMA(1,1) process where we know both $\delta$, $\phi$, and $\theta$ then
+
+$$
+\begin{aligned}
+\hat{y}_n &= \delta + \phi \, y_{n-1} + \theta \, w_{n-1} + w_n \\
+\\
+\hat{y}_{n+1} &= \delta + \phi \, y_{n} + \theta \, w_{n} + w_{n+1} \\
+              &\approx \delta + \phi \, y_{n} + \theta \, (y_n - \hat{y}_n) + 0 \\
+\\
+\hat{y}_{n+2} &= \delta + \phi \, y_{n+1} + \theta \, w_{n+1} + w_{n+2} \\
+              &\approx \delta + \phi \, \hat{y}_{n+1} + \theta \, 0 + 0 \\
+\end{aligned}
+$$
+
+## ARIMA(3,1,1) Example
+
+
+# Model Fitting
+
+## Fitting ARIMA - MLE {.t}
+
+For an $ARIMA(p,d,q)$ model 
+
+* Requires that the data be stationary after differencing
+\vspace{3mm}
+
+* Handling $d$ is straight forward, just difference the original data $d$ times (leaving $n-d$ observations)
+$$ y'_t = \Delta^d \, y_t $$
+\vspace{3mm}
+
+* After differencing fit an $ARMA(p,q)$ model to $y'_t$.
+\vspace{3mm}
+
+* To keep things simple we'll assume $w_t \overset{iid}{\sim} \mathcal{N}(0,\sigma^2_w)$
+
+
+## Stationarity & normal errors
+
+If both of these conditions are met, then the time series $y_t$ will also be normal.
+
+$~$
+
+In general, the vector $\bm{y} = (y_1, y_2, \ldots, y_t)'$ will have a multivariate normal distribution with mean $\bm\mu$  and covariance $\bm\Sigma$ where $\Sigma_{ij} = Cov(y_t, y_{t+i-j}) = \gamma_{i-j}$.
+
+$~$
+
+The joint density of $\bm y$ is given by
+
+$$ f_{\bm y}(\bm y) = \frac{1}{(2\pi)^{t/2}\,\det(\bm\Sigma)^{1/2}} \times \exp\left( -\frac{1}{2}(\bm y - \bm \mu)' \, \Sigma^{-1} \, (\bm y - \bm \mu) \right) $$
+
+## AR
+
+## Fitting $AR(1)$ {.t}
+
+$$ y_t = \delta + \phi \, y_{t-1} + w_t $$
+
+Need to estimate three parameters: $\delta$, $\phi$, and $\sigma_w^2$, we know
+
+$$ 
+\begin{aligned}
+E(y_t) &= \frac{\delta}{1-\phi} \\
+Var(y_t) &= \frac{\sigma_w^2}{1-\phi^2} \\
+Cov(y_t, y_{t+h}) &= \frac{\sigma_w^2}{1-\phi^2} \phi^{|h|}
+\end{aligned} 
+$$
+
+Using these properties it is possible to write down the MVN distribution of $\bm{y}$ but not that easy to write down a closed form density which we can then use to find the MLE.
+
+
+## Conditional Density
+
+We can rewrite the density as follows,
+
+$$
+\begin{aligned}
+f_{\bm y}
+  &= f_{y_t,\,y_{t-1},\,\ldots,\,y_2,\,y_1} \\
+  &= f_{y_t|\,y_{t-1},\,\ldots,\,y_2,\,y_1} f_{y_{t-1}|y_{t-2},\,\ldots,\,y_2,\,y_1} \cdots f_{y_2|y_1} f_{y_1} \\
+  &= f_{y_t|\,y_{t-1}} f_{y_{t-1}|y_{t-2}} \cdots f_{y_2|y_1} f_{y_1} 
+\end{aligned}
+$$
+
+where, 
+
+$$
+\begin{aligned}
+y_1 &\sim \mathcal{N}\left(\delta, \, \frac{\sigma^2_w}{1-\phi^2} \right) \\
+y_{t}|y_{t-1} &\sim \mathcal{N}\left(\delta+\phi\, y_{t-1}, \, \sigma^2_w \right) \\
+f_{y_{t}|y_{t-1}}(y_t) &= \frac{1}{\sqrt{2\pi \, \sigma^2_w}} \exp \left( -\frac{1}{2}\frac{(y_t -\delta+\phi\, y_{t-1})^2 }{\sigma^2_w} \right)
+\end{aligned}
+$$
+
+## Log likelihood of AR(1) {.t}
+
+\scriptsize
+$$
+\log f_{y_{t} | y_{t-1}}(y_t) = -\frac{1}{2}\left( \log 2\pi + \log \sigma^2_w + \frac{1}{\sigma_w^2} (y_t -\delta+\phi\, y_{t-1})^2 \right)
+$$
+
+
+$$
+\begin{aligned}
+\ell(\delta, \phi, \sigma^2_w) 
+  &= \log f_{\bm{y}} = \log f_{y_1} + \sum_{i=2}^t \log f_{y_{i}|y_{i-1}} \\
+  &= - \frac{1}{2} \bigg(\log 2\pi + \log \sigma_w^2 - \log (1-\phi^2) + \frac{(1-\phi^2)}{\sigma_w^2 }(y_1-\delta)^2 \bigg) \\
+  & ~~~~ - \frac{1}{2} \bigg( (n-1) \log 2\pi + (n-1) \log \sigma_w^2 + \frac{1}{\sigma_w^2} \sum_{i=2}^n (y_i -\delta+\phi\, y_{i-1})^2 \bigg) \\
+  &= - \frac{1}{2} \bigg( n \log 2\pi + n \log \sigma_w^2 - \log (1-\phi^2) + \frac{1}{\sigma_w^2} \bigg( (1-\phi^2)(y_1-\delta)^2 + \sum_{i=2}^n (y_i -\delta+\phi\, y_{i-1})^2 \bigg) \bigg)
+\end{aligned}
+$$
+
+
+## AR(1) Example {.t}
+
+with $\phi = -0.75$, $\delta=0.5$, and $\sigma_w^2=1$,
+
+```{r echo=FALSE}
+ar1 = arima.sim(n=200, model = list(order=c(1,0,0), ar=0.75), mean=0.5)
+plot(ar1)
+```
+
+## Arima {.t}
+
+```{r}
+Arima(ar1, order = c(1,0,0)) %>% summary()
+```
+
+## lm {.t}
+
+```{r}
+lm(ar1~lag(ar1)) %>% summary()
+```
+
+## Bayesian AR(1) Model {.t}
+
+```{r echo=FALSE}
+ar1_model = "model{
+# likelihood
+  y[1] ~ dnorm(delta/(1-phi), (sigma2_w/(1-phi^2))^-1)
+  y_hat[1] ~ dnorm(delta/(1-phi), (sigma2_w/(1-phi^2))^-1)
+
+  for (t in 2:length(y)) {
+    y[t] ~ dnorm(delta + phi*y[t-1], 1/sigma2_w)
+    y_hat[t] ~ dnorm(delta + phi*y[t-1], 1/sigma2_w)
+  }
+  
+  mu <- delta/(1-phi)
+
+# priors
+  delta ~ dnorm(0,1/1000)
+  phi ~ dnorm(0,1)
+  tau ~ dgamma(0.001,0.001)
+  sigma2_w <- 1/tau
+}"
+
+cat(ar1_model,"\n")
+```
+
+```{r echo=FALSE, include=FALSE}
+m = jags.model(
+        textConnection(ar1_model), 
+        data = list(y = ar1 %>% strip_attrs()), 
+        quiet = TRUE
+       ) 
+update(m, n.iter=1000, progress.bar="none")
+ar1_coda = coda.samples(
+        m, variable.names=c("delta", "phi", "sigma2_w","y_hat"), 
+        n.iter=5000, progress.bar="none"
+       )
+```
+
+## Posteriors
+
+```{r echo=FALSE, fig.height=3.5, fig.align="center"}
+ar1_truth = data_frame(param = c("delta", "phi", "sigma2_w"), value = c(0.5, 0.75, 1))
+
+ar1_params = get_coda_parameter(ar1_coda, "delta|phi|sigma") %>%
+  as_data_frame() %>%
+  gather(param, value)
+
+ar1_params %>%
+  ggplot(aes(x=value, fill=param)) +
+    geom_density() +
+    geom_vline(data=ar1_truth, aes(xintercept = value), size=1, alpha=0.5) +
+    facet_wrap(~param, ncol=3, scales = "free_x")
+
+```
+
+## Random Walk with Drift
+
+with $\phi = 1$, $\delta=0.1$, and $\sigma_w^2=1$ using the same models 
+
+```{r echo=FALSE}
+rwd = arima.sim(n=500, model=list(order=c(0,1,0)), mean=0.1) 
+tsdisplay(rwd, points = FALSE)
+```
+
+## lm {.t}
+
+```{r}
+lm(rwd~lag(rwd)) %>% summary()
+```
+
+## Arima {.t}
+
+```{r}
+Arima(rwd, order = c(1,0,0), include.constant = TRUE) %>% summary()
+```
+
+## Bayesian Posteriors
+
+```{r echo=FALSE, fig.height=3.5, fig.align="center"}
+m = jags.model(
+        textConnection(ar1_model), 
+        data = list(y = rwd %>% strip_attrs()), 
+        quiet = TRUE
+       ) 
+update(m, n.iter=1000, progress.bar="none")
+rwd_coda = coda.samples(
+        m, variable.names=c("delta", "phi", "sigma2_w","y_hat"), 
+        n.iter=5000, progress.bar="none"
+       )
+
+rwd_truth = data_frame(param = c("delta", "phi", "sigma2_w"), value = c(0.1, 1, 1))
+
+rwd_params = get_coda_parameter(rwd_coda, "delta|phi|sigma") %>%
+  as_data_frame()
+  
+
+rwd_params %>%
+  gather(param, value) %>%
+  ggplot(aes(x=value, fill=param)) +
+    geom_density() +
+    geom_vline(data=rwd_truth, aes(xintercept = value), size=1, alpha=0.5) +
+    facet_wrap(~param, ncol=3, scales = "free")
+```
+
+## Non-stationary Bayesian Model {.t}
+
+```{r echo=FALSE}
+ar1_ns_model = "model{
+# likelihood
+  #y[1] ~ dnorm(delta/(1-phi), (sigma2_w/(1-phi^2))^-1)
+  #y_hat[1] ~ dnorm(delta/(1-phi), (sigma2_w/(1-phi^2))^-1)
+
+  for (t in 2:length(y)) {
+    y[t] ~ dnorm(delta + phi*y[t-1], 1/sigma2_w)
+    y_hat[t] ~ dnorm(delta + phi*y[t-1], 1/sigma2_w)
+  }
+  
+  mu <- delta/(1-phi)
+
+# priors
+  delta ~ dnorm(0,1/1000)
+  phi ~ dnorm(0,1)
+  tau ~ dgamma(0.001,0.001)
+  sigma2_w <- 1/tau
+}"
+
+cat(ar1_ns_model, "\n")
+```
+
+## NS Bayesian Posteriors
+
+```{r echo=FALSE, fig.height=3.5, fig.align="center"}
+m = jags.model(
+        textConnection(ar1_ns_model), 
+        data = list(y = rwd %>% strip_attrs()), 
+        quiet = TRUE
+       ) 
+update(m, n.iter=1000, progress.bar="none")
+rwd_coda = coda.samples(
+        m, variable.names=c("delta", "phi", "sigma2_w","y_hat"), 
+        n.iter=5000, progress.bar="none"
+       )
+
+rwd_truth = data_frame(param = c("delta", "phi", "sigma2_w"), value = c(0.1, 1, 1))
+
+rwd_params = get_coda_parameter(rwd_coda, "delta|phi|sigma") %>%
+  as_data_frame()
+  
+
+rwd_params %>%
+  gather(param, value) %>%
+  ggplot(aes(x=value, fill=param)) +
+    geom_density() +
+    geom_vline(data=rwd_truth, aes(xintercept = value), size=1, alpha=0.5) +
+    facet_wrap(~param, ncol=3, scales = "free")
+```
+
+## Probability of being stationary {.t}
+
+```{r}
+rwd_params$phi %>% abs() %>% {. < 1} %>% {sum(.) / length(.)}
+```
+
+
+## Correct ARIMA
+
+```{r}
+Arima(rwd, order = c(0,1,0), include.constant = TRUE) %>% summary()
+```
+
+## Fitting AR(p) {.t}
+
+We can rewrite the density as follows,
+$$
+\begin{aligned}
+f(\bm y)
+  &= f(y_1, \,y_2, \,\ldots, \,y_{t-1}, \,y_{t}) \\
+  &= f(y_1, \, y_2, \,\ldots, y_p) f(y_{p+1}|y_1,\ldots,y_p) \cdots f(y_{n}|y_{n-p},\ldots,y_{n-1}) 
+\end{aligned}
+$$
+
+. . .
+
+Regressing $y_t$ on $y_{t-p}, \ldots, y_{t-1}$ gets us an approximate solution, but it ignores the $f(y_1, \, y_2, \,\ldots, y_p)$ part of the likelihood. 
+
+How much does this matter (vs. using the full likelihood)?
+
+* If $p$ is not much smaller than $n$ then probably a lot
+
+* If $p << n$ then probably not much
+
+# ARMA
+
+## Fitting $AR(2,2)$ {.t}
+
+$$ y_t = \delta + \phi_1 \, y_{t-1} + \phi_2 \, y_{t-2} + \theta_1 w_{t-1} + \theta_2 w_{t-2} + w_t $$
+
+Need to estimate six parameters: $\delta$, $\phi_1$, $\phi_2$, $\theta_1$, $\theta_2$ and $\sigma_w^2$.
+
+. . .
+
+$~$
+
+We could figure out $E(y_t)$, $Var(y_t)$, and $Cov(y_t, y_{t+h})$, but the last two are going to likely be pretty nasty and the full MVN likehood is similarly going to be unpleasant to work with.
+
+. . .
+
+$~$
+
+Like the AR(1) and AR(p) processes we want to use conditioning to simplify things.
+$$ y_t | \delta, y_{t-1}, y_{t-2}, w_{t-1}, w_{t-2} \sim \mathcal{N}(\delta + \phi_1 \, y_{t-1} + \phi_2 \, y_{t-2} + \theta_1 w_{t-1} + \theta_2 w_{t-2},~\sigma_w^2) $$
+
+## ARMA(2,2) Example
+
+with $\phi = (1.3,-0.5)$, $\theta = (0.5,0.2)$, $\delta=0$, and $\sigma_w^2=1$ using the same models 
+
+```{r echo=FALSE}
+# Based on http://www-stat.wharton.upenn.edu/~stine/stat910/rcode/12.R
+y = arima.sim(n=500, model=list(ar=c(1.3,-0.5), ma=c(0.5,0.2)))
+
+tsdisplay(y, points = FALSE)
+```
+
+## ARIMA
+
+```{r}
+Arima(y, order = c(2,0,2), include.mean = FALSE) %>% summary()
+```
+
+## AR only lm
+
+```{r}
+(lm_ar = lm(y ~ lag(y,1) + lag(y,2))) %>% summary()
+```
+
+## Hannan-Rissanen Algorithm {.t}
+
+1. Estimate a high order AR (remember AR $\Leftrightarrow$ MA when stationary + invertible)
+
+\vspace{5mm}
+
+2. Use AR to estimate values for unobserved $w_t$
+
+\vspace{5mm}
+
+3. Regress $y_t$ onto $y_{t-1}, \ldots, y_{t-p}, \hat{w}_{t-1}, \ldots \hat{w}_{t-q}$
+
+\vspace{5mm}
+
+4. Update $\hat{w}_{t-1}, \ldots \hat{w}_{t-q}$ based on current model, refit and then repeat until convergence
+
+
+## Hannan-Rissanen - Step 1 & 2 {.t}
+
+\scriptoutput
+
+```{r}
+ar = ar.mle(y, order.max = 20)
+ar
+ar$resid
+```
+
+## Hannan-Rissanen - Step 3
+
+\scriptoutput
+
+```{r}
+d = data_frame(y = y %>% strip_attrs(), w_hat1 = ar$resid %>% strip_attrs())
+
+(lm1 = lm(y ~ lag(y,1) + lag(y,2) + lag(w_hat1,1) + lag(w_hat1,2), data=d)) %>%
+  summary()
+```
+
+## Hannan-Rissanen - Step 4.1
+
+\scriptoutput
+
+```{r}
+d = add_residuals(d,lm1,"w_hat2")
+
+(lm2 = lm(y ~ lag(y,1) + lag(y,2) + lag(w_hat2,1) + lag(w_hat2,2), data=d)) %>%
+  summary()
+```
+
+## Hannan-Rissanen - Step 4.2
+
+\scriptoutput
+
+```{r}
+d = add_residuals(d,lm2,"w_hat3")
+
+(lm3 = lm(y ~ lag(y,1) + lag(y,2) + lag(w_hat3,1) + lag(w_hat3,2), data=d)) %>%
+  summary()
+```
+
+## Hannan-Rissanen - Step 4.3
+
+\scriptoutput
+
+```{r}
+d = add_residuals(d,lm3,"w_hat4")
+
+(lm4 = lm(y ~ lag(y,1) + lag(y,2) + lag(w_hat4,1) + lag(w_hat4,2), data=d)) %>%
+  summary()
+```
+
+## Hannan-Rissanen - Step 4.4
+
+\scriptoutput
+
+```{r}
+d = add_residuals(d,lm4,"w_hat5")
+
+(lm5 = lm(y ~ lag(y,1) + lag(y,2) + lag(w_hat5,1) + lag(w_hat5,2), data=d)) %>%
+  summary()
+```
+
+## RMSEs
+
+```{r}
+rmse(lm_ar, data = d)
+
+rmse(lm1, data = d)
+
+rmse(lm2, data = d)
+
+rmse(lm3, data = d)
+
+rmse(lm4, data = d)
+
+rmse(lm5, data = d)
+```
+
+## Bayesian Model
+
+\tinyoutput
+
+```{r echo=FALSE}
+arma22_model = "model{
+# Likelihood
+  for (t in 1:length(y)) {
+    y[t] ~ dnorm(mu[t], 1/sigma2_e)
+  }                                   
+
+  mu[1] <- phi[1] * y_0  + phi[2] * y_n1 + w[1] + theta[1]*w_0  - theta[2]*w_n1
+  mu[2] <- phi[1] * y[1] + phi[2] * y_0  + w[2] + theta[1]*w[1] - theta[2]*w_0   
+  for (t in 3:length(y)) { 
+    mu[t] <- phi[1] * y[t-1] + phi[2] * y[t-2] + w[t] + theta[1] * w[t-1] + theta[2] * w[t-2]
+  }
+  
+# Priors
+  for(t in 1:length(y)){
+    w[t] ~ dnorm(0,1/sigma2_w)
+  }
+
+  sigma2_w = 1/tau_w; tau_w ~ dgamma(0.001, 0.001) 
+  sigma2_e = 1/tau_e; tau_e ~ dgamma(0.001, 0.001) 
+  for(i in 1:2) {
+    phi[i] ~ dnorm(0,1)
+    theta[i] ~ dnorm(0,1)
+  }
+
+# Latent errors and series values
+  w_0  ~ dt(0,tau_w,2)
+  w_n1 ~ dt(0,tau_w,2)
+  y_0  ~ dnorm(0,1/1000)
+  y_n1 ~ dnorm(0,1/1000)
+}"
+
+cat(arma22_model, "\n")
+```
+
+
+## Bayesian Fit
+
+```{r echo=FALSE, fig.height=5, fig.align="center"}
+m = jags.model(
+        textConnection(arma22_model), 
+        data = list(y = y %>% strip_attrs()), 
+        quiet = TRUE
+       ) 
+update(m, n.iter=10000, progress.bar="none")
+arma22_coda = coda.samples(
+        m, variable.names=c("phi", "theta", "sigma2_w"), 
+        n.iter=20000, progress.bar="none", thin = 10
+       )
+
+arma22_truth = data_frame(param = c("phi[1]", "phi[2]", "theta[1]", "theta[2]"), value = c(1.3, -0.5, 0.5, 0.2))
+
+arma22_params = get_coda_parameter(arma22_coda, "phi|theta") %>%
+  as_data_frame()
+  
+
+arma22_params %>%
+  gather(param, value) %>%
+  ggplot(aes(x=value, fill=param)) +
+    geom_density() +
+    geom_vline(data=arma22_truth, aes(xintercept = value), size=1, alpha=0.5) +
+    facet_wrap(~param, ncol=2, scales = "free")
+```
+

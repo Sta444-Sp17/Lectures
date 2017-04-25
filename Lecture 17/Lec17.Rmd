@@ -1,0 +1,506 @@
+
+---
+title: "Lecture 17" 
+subtitle: "Spatial Data and Cartography (Part 2)"
+author: "Colin Rundel"
+date: "03/22/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE, 
+                      fig.align="center", out.width="0.95\\textwidth")
+options(width=70)
+
+set.seed(20170322)
+
+library(raster)
+library(dplyr)
+library(sf)
+library(stringr)
+library(purrr)
+library(ggplot2)
+library(gridExtra)
+
+
+strip_attrs = function(obj)
+{
+  attributes(obj) = NULL
+  obj
+}
+
+strip_class = function(obj)
+{
+  attr(obj,"class") = NULL
+  obj
+}
+```
+
+# Plotting
+
+## Example Data - NC SIDS {.t}
+
+\scriptoutput
+
+```{r}
+nc = st_read(system.file("shape/nc.shp", package="sf"), quiet = TRUE) %>% 
+  select(-(AREA:CNTY_ID), -(FIPS:CRESS_ID))
+
+head(nc, n = 10)
+```
+
+## Base Plots {.t}
+
+\scriptoutput
+
+```{r out.width="0.8\\textwidth"}
+plot(nc)
+```
+
+## Geometry Plot {.t}
+
+\scriptoutput
+
+```{r}
+plot(st_geometry(nc), axes=TRUE)
+```
+
+## Graticules {.t}
+
+\scriptoutput
+
+```{r}
+plot(nc[,"SID79"], graticule=st_crs(nc), axes=TRUE, las=1)
+```
+
+## Graticules (EPSG:3631) {.t}
+
+\scriptoutput
+
+```{r}
+plot(st_transform(nc[,"SID79"], 3631), graticule=st_crs(nc), axes=TRUE, las=1)
+```
+
+
+## ggplot2 2.2.1.9 (dev) {.t}
+
+\scriptoutput
+
+```{r}
+ggplot(nc) + 
+  geom_sf(aes(fill=SID79 / BIR79))
+```
+
+## ggplot2 + projections {.t}
+
+\scriptoutput
+
+```{r}
+ggplot(st_transform(nc, 3631)) + 
+  geom_sf(aes(fill=SID79 / BIR79))
+```
+
+
+## Example Data - Meuse
+
+\scriptoutput
+
+```{r}
+data(meuse, meuse.riv, package="sp")
+
+meuse = st_as_sf(meuse, coords=c("x", "y"), crs=28992)
+meuse_riv = st_polygon(list(meuse.riv)) %>% st_sfc() %>% st_set_crs(28992)
+
+meuse
+```
+
+## Meuse {.t}
+
+\scriptoutput
+
+```{r}
+plot(meuse, pch=16)
+```
+
+
+
+## Layering plots {.t}
+
+\scriptoutput
+
+```{r}
+plot(meuse[,"lead"], pch=16, axes=TRUE)
+plot(meuse_riv, col=adjustcolor("lightblue", alpha.f=0.5), add=TRUE, border = NA)
+```
+
+## Layering plots (oops)  {.t}
+
+\scriptoutput
+
+```{r}
+plot(meuse, pch=16)
+plot(meuse_riv, col=adjustcolor("lightblue", alpha.f=0.5), add=TRUE, border = NA)
+```
+
+## ggplot2 {.t}
+
+\scriptoutput
+
+```{r out.width="0.33\\textwidth"}
+ggplot() +
+  geom_sf(data=st_sf(meuse_riv), fill="lightblue", color=NA) +
+  geom_sf(data=meuse, aes(color=lead), size=1)
+```
+
+## ggplot2 - axis limits {.t}
+
+\scriptoutput
+
+```{r out.width="0.65\\textwidth"}
+ggplot() +
+  geom_sf(data=st_sf(meuse_riv), fill="lightblue", color=NA) +
+  geom_sf(data=meuse, aes(color=lead), size=0.1) +
+  ylim(329714, 333611)
+```
+
+## ggplot2 - bounding box{.t}
+
+\scriptoutput
+
+```{r out.width="0.65\\textwidth"}
+ggplot() +
+  geom_sf(data=st_sf(meuse_riv), fill="lightblue", color=NA) +
+  geom_sf(data=meuse, aes(color=lead), size=0.1) +
+  ylim(st_bbox(meuse)["ymin"], st_bbox(meuse)["ymax"])
+```
+
+# Geometry Manipulation
+
+## Casting {.t}
+
+\scriptoutput
+
+```{r}
+nc_pts = st_cast(nc, "MULTIPOINT")
+
+nc_pts
+```
+
+## {.t}
+
+\scriptoutput
+
+```{r}
+plot(st_geometry(nc), border='grey')
+plot(st_geometry(nc_pts), pch=16, cex=0.5, add=TRUE)
+```
+
+## Casting - POINT {.t}
+
+\scriptoutput
+
+```{r}
+st_cast(nc, "POINT")
+```
+
+## Casting - LINESTRING {.t}
+
+\scriptoutput
+
+```{r}
+st_cast(nc, "LINESTRING")
+```
+
+## {.t}
+
+\scriptoutput
+
+```{r}
+st_cast(nc, "LINESTRING") %>% st_geometry() %>% plot()
+```
+
+
+## Grouping Features {.t}
+
+\scriptoutput
+
+```{r}
+nc_state = st_union(nc)
+plot(nc_state)
+
+nc_state
+```
+
+## More Grouping {.t}
+
+\scriptoutput
+
+```{r}
+nc_cut = nc %>%
+  cbind(nc %>% st_centroid() %>% st_coordinates()) %>%
+  mutate(region = cut(X, breaks = 5))
+
+nc_cut
+```
+
+## {.t}
+
+\scriptoutput
+
+```{r}
+ggplot(nc_cut) +
+  geom_sf(aes(fill=region))
+```
+
+## dplyr and sf - BFFs {.t}
+
+\scriptoutput
+
+```{r}
+nc_cut %>% 
+  group_by(region) %>% 
+  summarize(geometry = st_union(geometry)) %>% 
+  ggplot() + geom_sf(aes(fill=region))
+```
+
+
+## Affine Transfomations {.t}
+
+\scriptoutput
+
+```{r}
+rotate = function(a) matrix(c(cos(a), sin(a), -sin(a), cos(a)), 2, 2)
+
+ctrd = st_centroid(nc_state)
+state_rotate = (nc_state - ctrd) * rotate(-pi/4) + ctrd
+plot(state_rotate, axes=TRUE)
+```
+
+## Scaling Size
+
+\scriptoutput
+
+```{r}
+ctrd = st_geometry(st_centroid(nc))
+area = st_area(nc) %>% strip_attrs()
+nc_scaled = nc
+for(i in 1:nrow(nc))
+  nc_scaled$geometry[[i]] = ((st_geometry(nc[i,]) - ctrd[i]) *
+                               sqrt(min(area)/area[i]) + ctrd[i])[[1]]
+
+plot(nc_scaled[,"SID79"])
+```
+
+
+## Back to the highways {.t}
+
+\scriptoutput
+
+```{r}
+hwy = st_read("../../data/gis/us_interstates/", quiet=TRUE, stringsAsFactors=FALSE) %>% st_transform(st_crs(nc))
+
+ggplot() +
+  geom_sf(data=nc) +
+  geom_sf(data=hwy, col='red')
+```
+
+## NC Interstate Highways {.t}
+
+\scriptoutput
+
+```{r}
+hwy_nc = st_intersection(hwy, nc)
+
+ggplot() + 
+  geom_sf(data=nc) +
+  geom_sf(data=hwy_nc, col='red')
+
+hwy_nc
+```
+
+## Counties near the interstate (Projection) {.t}
+
+\scriptoutput
+
+```{r}
+nc_utm  = st_transform(nc,  "+proj=utm +zone=17 +datum=NAD83 +units=m +no_defs")
+hwy_utm = st_transform(hwy, "+proj=utm +zone=17 +datum=NAD83 +units=m +no_defs")
+
+hwy_nc_utm = st_intersection(nc_utm, hwy_utm)
+
+ggplot() + 
+  geom_sf(data=nc_utm) +
+  geom_sf(data=hwy_nc_utm, col='red')
+```
+
+## Counties near the interstate (Buffering) {.t}
+
+\scriptoutput
+
+```{r}
+hwy_nc_buffer = st_buffer(hwy_nc_utm, 10000)
+
+ggplot() + 
+  geom_sf(data=nc_utm) +
+  geom_sf(data=hwy_nc_utm, color='red') +
+  geom_sf(data=hwy_nc_buffer, fill='red', alpha=0.3)
+```
+
+## Counties near the interstate (Buffering + Union) {.t}
+
+\scriptoutput
+
+```{r}
+hwy_nc_buffer = st_buffer(hwy_nc_utm, 10000) %>% st_union() %>% st_sf()
+
+ggplot() + 
+  geom_sf(data=nc_utm) +
+  geom_sf(data=hwy_nc_utm, color='red') +
+  geom_sf(data=hwy_nc_buffer, fill='red', alpha=0.3)
+```
+
+## Exercise 1 {.t}
+
+How many counties in North Carolina are within 5, 10, 20, or 50 km of an interstate highway?
+
+
+
+# Raster Data
+
+## Example data - Meuse {.t}
+
+\scriptoutput
+
+```{r}
+meuse_rast = raster(system.file("external/test.grd", package="raster"))
+
+meuse_rast
+```
+
+## {.t}
+
+\scriptoutput
+
+```{r}
+plot(meuse_rast)
+plot(meuse_riv, add=TRUE, col=adjustcolor("lightblue",alpha.f = 0.5), border=NA)
+```
+
+## raster class
+
+```{r}
+str(meuse_rast)
+```
+
+## raster features {.t}
+
+\scriptoutput
+
+```{r}
+extent(meuse_rast)
+
+dim(meuse_rast)
+
+res(meuse_rast)
+
+projection(meuse_rast)
+
+meuse_rast[20,]
+```
+
+## Rasters and Projections {.t}
+
+\scriptoutput
+
+```{r}
+meuse_rast_ll = projectRaster(meuse_rast, crs="+proj=longlat +datum=NAD27 +no_defs")
+
+par(mfrow=c(1,2))
+plot(meuse_rast)
+plot(meuse_rast_ll)
+```
+
+## {.t}
+
+\scriptoutput
+
+```{r}
+meuse_rast
+
+meuse_rast_ll
+```
+
+
+
+## Simple Features $\longleftrightarrow$ Rasters {.t}
+
+\scriptoutput
+
+```{r error=TRUE}
+meuse_riv_rast = rasterize(meuse_riv, meuse_rast)
+
+meuse_riv_rast = rasterize(as(meuse_riv, "Spatial"), meuse_rast)
+plot(meuse_riv_rast)
+```
+
+
+## {.t}
+
+\scriptoutput
+
+```{r error=TRUE}
+sub = !is.na(meuse_riv_rast[]) & !is.na(meuse_rast[])
+river_obs = meuse_rast
+river_obs[!sub] = NA
+plot(river_obs)
+
+xyFromCell(river_obs, which(sub))
+```
+
+## Rasters and Spatial Models {.t}
+
+\scriptoutput
+
+```{r}
+head(meuse)
+
+head(st_coordinates(meuse))
+```
+
+## {.t}
+
+\scriptoutput
+
+```{r}
+library(fields)
+
+tps = Tps(x = st_coordinates(meuse), Y=meuse$elev)
+pred_grid = xyFromCell(meuse_rast, seq_along(meuse_rast))
+
+meuse_elev_pred = meuse_rast
+meuse_elev_pred[] = predict(tps, pred_grid)
+
+plot(meuse_elev_pred)
+```
+
+## Hacky Crap
+
+```{r fig.height=4}
+p = rasterToPolygons(meuse_elev_pred) %>% st_as_sf()
+grid.arrange(
+  ggplot() + geom_sf(data=meuse, aes(color=elev), size=0.1),
+  ggplot() + geom_sf(data=p, aes(fill=test), color=NA),
+  ncol=2
+)
+```

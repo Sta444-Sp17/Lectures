@@ -1,0 +1,28 @@
+\frametitle{Spatial Correlogram}
+
+\scriptoutput
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{d =}\StringTok{ }\NormalTok{nc }\OperatorTok{%>%}\StringTok{ }\KeywordTok{st_centroid}\NormalTok{() }\OperatorTok{%>%}\StringTok{ }\KeywordTok{st_distance}\NormalTok{() }\OperatorTok{%>%}\StringTok{ }\KeywordTok{strip_class}\NormalTok{()}
+\NormalTok{breaks =}\StringTok{ }\KeywordTok{seq}\NormalTok{(}\DecValTok{0}\NormalTok{, }\KeywordTok{max}\NormalTok{(d), }\DataTypeTok{length.out =} \DecValTok{21}\NormalTok{)}
+\NormalTok{d_cut =}\StringTok{ }\KeywordTok{cut}\NormalTok{(d, breaks)}
+
+\NormalTok{adj_mats =}\StringTok{ }\KeywordTok{map}\NormalTok{(}
+  \KeywordTok{levels}\NormalTok{(d_cut), }
+  \ControlFlowTok{function}\NormalTok{(l) }
+\NormalTok{  \{}
+\NormalTok{    (d_cut }\OperatorTok{==}\StringTok{ }\NormalTok{l) }\OperatorTok{%>%}
+\StringTok{      }\KeywordTok{matrix}\NormalTok{(}\DataTypeTok{ncol=}\DecValTok{100}\NormalTok{) }\OperatorTok{%>%}
+\StringTok{      `}\DataTypeTok{diag<-}\StringTok{`}\NormalTok{(}\DecValTok{0}\NormalTok{)}
+\NormalTok{  \}}
+\NormalTok{)}
+
+\NormalTok{d =}\StringTok{ }\KeywordTok{data_frame}\NormalTok{(}
+  \DataTypeTok{dist   =}\NormalTok{ breaks[}\OperatorTok{-}\DecValTok{1}\NormalTok{],}
+  \DataTypeTok{morans =} \KeywordTok{map_dbl}\NormalTok{(adj_mats, morans_I, }\DataTypeTok{y =}\NormalTok{ nc}\OperatorTok{$}\NormalTok{SID74),}
+  \DataTypeTok{gearys =} \KeywordTok{map_dbl}\NormalTok{(adj_mats, gearys_C, }\DataTypeTok{y =}\NormalTok{ nc}\OperatorTok{$}\NormalTok{SID74)}
+\NormalTok{)}
+\end{Highlighting}
+\end{Shaded}
+

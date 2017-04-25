@@ -1,0 +1,5 @@
+\beamer@endinputifotherversion {3.36pt}
+\select@language {english}
+\beamer@sectionintoc {1}{Background}{2}{0}{1}
+\beamer@sectionintoc {2}{Geospatial stuff is complicated}{10}{0}{2}
+\beamer@sectionintoc {3}{Querying and Manipulating Spatial Data}{18}{0}{3}

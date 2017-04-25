@@ -1,0 +1,699 @@
+
+---
+title: "Lecture 13" 
+subtitle: "Gaussian Process Models - Part 2"
+author: "Colin Rundel"
+date: "03/01/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE)
+options(width=70)
+
+set.seed(20170301)
+
+library(magrittr)
+library(dplyr)
+library(modelr)
+library(ggplot2)
+library(tidyr)
+library(rjags)
+library(stringr)
+library(gridExtra)
+library(readr)
+library(purrr)
+library(forcats)
+library(forecast)
+library(astsa)
+library(fields)
+
+theme_set(
+  theme_bw()  
+)
+
+get_coda_parameter = function(coda, pattern)
+{
+  w = coda[[1]] %>% colnames() %>% str_detect(pattern)
+  coda[[1]][,w,drop=FALSE]
+}
+
+post_summary = function(m, ci_width=0.95)
+{
+  d = data_frame(
+    post_mean  = apply(m, 2, mean),
+    post_med   = apply(m, 2, median),
+    post_lower = apply(m, 2, quantile, probs=(1-ci_width)/2),
+    post_upper = apply(m, 2, quantile, probs=1 - (1-ci_width)/2)
+  )
+  
+  if (!is.null(colnames(m)))
+    d = d %>% mutate(param = colnames(m)) %>% select(param,post_mean:post_upper)
+  
+  d
+}
+
+strip_attrs = function(obj)
+{
+  attributes(obj) = NULL
+  obj
+}
+
+strip_class = function(obj)
+{
+  attr(obj,"class") = NULL
+  obj
+}
+```
+
+# EDA and GPs
+
+## Variogram {.t}
+
+From the spatial modeling literature the typical approach is to examine an *empirical variogram*, first we'll look at the *theoretical variogram* before looking at the connection to the covariance.
+
+\vspace{2mm}
+
+. . .
+
+Variogram:
+$$ \begin{aligned}
+2 \gamma(t_i, t_j) 
+  &= Var(Y(t_i) - Y(t_j)) \\
+  &= E( [(Y(t_i)-\mu(t_i)) - (Y(t_j)-\mu(t_j))]^2)  \\
+\end{aligned}$$
+where $\gamma(t_i, t_j)$ is called the semivariogram.
+
+\vspace{2mm}
+
+. . .
+
+If the process has constant mean (e.g. $\mu(t_i) = \mu(t_j)$ for all $i$ and $j$) then we can simplify to 
+$$ \begin{aligned}
+2 \gamma(t_i, t_j) &= E( [Y(t_i)-Y(t_j)]^2)  \\
+\end{aligned}$$
+
+
+## Some Properties of the theoretical Variogram / Semivariogram {.t}
+
+\vspace{-3mm}
+
+* both are non-negative 
+\footnotesize $$\gamma(t_i, t_j) \geq 0$$ \normalsize
+
+\vspace{2mm}
+
+* both are 0 at distance 0
+\footnotesize $$\gamma(t_i, t_i) = 0$$ \normalsize
+
+\vspace{2mm}
+
+* both are symmetric 
+\footnotesize $$\gamma(t_i, t_j) = \gamma(t_j, t_i)$$ \normalsize
+
+\vspace{2mm}
+
+* there is no dependence if
+\footnotesize $$2\gamma(t_i, t_j) = Var(Y(t_i)) + Var(Y(t_j)) \quad \text{ for all } i \ne j$$ \normalsize
+
+\vspace{2mm}
+
+* if the process *is not* stationary
+\footnotesize
+$$2\gamma(t_i, t_j) = Var\big(Y(t_i)\big) + Var\big(Y(t_j)\big) - 2 \, Cov\big(Y(t_i),Y(t_j)\big)$$
+
+\vspace{2mm}
+
+* if the process *is* stationary
+\footnotesize
+$$\begin{aligned}
+2\gamma(t_i, t_j) 
+  &= 2Var\big(Y(t_i)\big) - 2 \, Cov\big(Y(t_i),Y(t_j)\big)
+\end{aligned}$$
+
+
+## Empirical Semivariogram {.t}
+
+We will assume that our process of interest is stationary, in which case we will parameterize the semivariagram in terms of $h = |t_i - t_j|$.
+
+\vspace{3mm}
+
+Empirical Semivariogram:
+$$ \hat{\gamma}(h) = \frac{1}{2 \, N(h)} \sum_{|t_i-t_j| \in (h-\epsilon,h+\epsilon)} (Y(t_i) - Y(t_j))^2 $$
+
+. . .
+
+Practically, for any data set with $n$ observations there are ${n \choose 2} + n$ possible data pairs to examine. Each individually is not very informative, so we aggregate into bins and calculate the empirical semivariogram for each bin.  
+
+
+## Connection to Covariance
+
+<!--
+$$\begin{aligned}
+2\gamma(t_i, t_j) &= 2Var\big(Y(t_i)\big) - 2 \, Cov\big(Y(t_i),Y(t_j)\big) \\
+\gamma(t_i, t_j) &= Var\big(Y(t_i)\big) - \, Cov\big(Y(t_i),Y(t_j)\big) \\
+  &= \sigma^2 - \, \sigma^2 \exp\big(-(|t_i-t_j|\,l)^2\big)
+\end{aligned}$$
+-->
+
+
+## Covariance vs Semivariogram - Exponential
+
+```{r echo=FALSE, fig.height=4.5}
+exp_cov     = function(d, sigma2=1, l=1, sigma2_w=0)      sigma2 * exp(-abs(d)*l)     + ifelse(d==0,sigma2_w, 0)
+sq_exp_cov  = function(d, sigma2=1, l=1, sigma2_w=0)      sigma2 * exp(-(abs(d)*l)^2) + ifelse(d==0,sigma2_w, 0)
+pow_exp_cov = function(d, sigma2=1, l=1, p=2, sigma2_w=0) sigma2 * exp(-(abs(d)*l)^p) + ifelse(d==0,sigma2_w, 0)
+
+exp_sv     = function(d, sigma2=1, l=1, sigma2_w=0)      sigma2 + sigma2_w - exp_cov(d,sigma2,l,sigma2_w)
+sq_exp_sv  = function(d, sigma2=1, l=1, sigma2_w=0)      sigma2 + sigma2_w - sq_exp_cov(d,sigma2,l,sigma2_w)
+pow_exp_sv = function(d, sigma2=1, l=1, p=2, sigma2_w=0) sigma2 + sigma2_w - pow_exp_cov(d,sigma2,l,p,sigma2_w)
+
+
+
+vals = expand.grid(
+  d = seq(0, 1.5, length.out = 100),
+  l = seq(1, 7, length.out = 10)
+) %>%
+  as.data.frame() %>%
+  tbl_df()
+
+exp = rbind(
+  cbind(data_frame(func="exp cov"), by_row(vals, function(x) exp_cov(x$d, l=x$l), .collate="rows", .to="y")),
+  cbind(data_frame(func="exp semivar"), by_row(vals, function(x) exp_sv(x$d, l=x$l), .collate="rows", .to="y"))
+)
+
+sq_exp = rbind(
+  cbind(data_frame(func="sq exp cov"), by_row(vals, function(x) sq_exp_cov(x$d, l=x$l), .collate="rows", .to="y")),
+  cbind(data_frame(func="sq exp semivar"), by_row(vals, function(x) sq_exp_sv(x$d, l=x$l), .collate="rows", .to="y"))
+) 
+```
+
+```{r echo=FALSE, fig.height=3.5}
+exp %>%
+  mutate(l = as.factor(round(l,1))) %>%
+  ggplot(aes(x=d, y=y, color=l)) +
+    geom_line() +
+    facet_wrap(~func, ncol=2)
+```
+
+## Covariance vs Semivariogram - Square Exponential
+
+```{r echo=FALSE, fig.height=3.5}
+sq_exp %>%
+  mutate(l = as.factor(round(l,1))) %>%
+  ggplot(aes(x=d, y=y, color=l)) +
+    geom_line() +
+    facet_wrap(~func, ncol=2)
+```
+
+
+## From last time
+
+```{r echo=FALSE}
+load(file="../Lecture 12/lec12_ex.Rdata")
+base
+```
+
+## Empirical semivariogram - no bins / cloud
+
+```{r echo=FALSE}
+# From https://github.com/hadley/dplyr/issues/271
+bin <- function(df, var, binwidth, origin = NULL) {
+  n <- nrow(df)
+
+  var <- as.character(substitute(var))
+  x <- df[[var]]
+
+  if (is.null(origin)) {
+    origin <- min(x)
+  }
+
+  bin <- (x - origin) %/% binwidth
+  indices <- unname(split(seq_len(n) - 1, bin))
+  
+  mid = origin + (0:(max(bin)+1)) * binwidth + binwidth/2
+  
+  df[["bin_mid"]] <- mid[bin+1]
+  
+  attr(df, "indices") <- indices
+  attr(df, "drop") <- FALSE
+  attr(df, "group_sizes") <- sapply(indices, length)
+  attr(df, "biggest_group_size") <- max(attr(df, "group_sizes"))
+  attr(df, "labels") <- data.frame(bin = seq_along(indices))
+  attr(df, "vars") <- list(quote(bin))
+  class(df) <- c("grouped_df", "tbl_df", "tbl", "data.frame")
+
+  df
+}
+
+
+
+dist_long = function(d)
+{
+  d = as.matrix(d)
+  d[upper.tri(d, diag = TRUE)] = NA
+  
+  data.frame(
+    expand.grid(i=1:nrow(d), j=1:nrow(d)),
+    c(d)
+  ) %>%
+    setNames(c("i","j","dist")) %>%
+    filter(!is.na(dist))
+}
+
+emp_semivariogram = function(d, y, x, bin=FALSE, binwidth, range_max)
+{
+  y_col = as.character(substitute(y))
+  x_col = as.character(substitute(x))
+  
+  d = d[[x_col]] %>%
+    dist() %>% 
+    dist_long() %>%
+    mutate(y_i = d[[y_col]][i], y_j = d[[y_col]][j])
+  
+  
+  if (bin)
+  {
+    d = d %>% bin(dist, binwidth = binwidth)
+  } else {
+    d = d %>% mutate(bin_mid = dist) %>% rowwise()
+  }
+  
+  d = d %>%
+    summarize(
+      gamma = sum( (y_i - y_j)^2 / (2*n()) ),
+      h = mean(bin_mid),
+      n = n()
+    )
+  
+  if (!missing(range_max))
+    d = d %>% filter(h < range_max)
+  
+  d
+}
+```
+
+```{r echo=FALSE}
+d_emp_cloud = d %>% emp_semivariogram(y,t)
+
+d_emp_cloud %>%
+  ggplot(aes(x=h, y=gamma)) +
+  geom_point()
+```
+
+## Empirical semivariogram (binned)
+
+```{r echo=FALSE}
+d_emp = rbind(
+  d %>% emp_semivariogram(y, t, bin=TRUE, binwidth=0.05)  %>% mutate(binwidth="binwidth=0.05"),
+  d %>% emp_semivariogram(y, t, bin=TRUE, binwidth=0.075) %>% mutate(binwidth="binwidth=0.075"),
+  d %>% emp_semivariogram(y, t, bin=TRUE, binwidth=0.1)   %>% mutate(binwidth="binwidth=0.1"),
+  d %>% emp_semivariogram(y, t, bin=TRUE, binwidth=0.15)  %>% mutate(binwidth="binwidth=0.15")
+)
+
+d_emp %>%
+  ggplot(aes(x=h, y=gamma)) +
+  geom_point() +
+  facet_wrap(~binwidth, nrow=2)
+```
+
+
+## Empirical semivariogram (binned + n)
+
+```{r echo=FALSE}
+d_emp %>%
+  ggplot(aes(x=h, y=gamma, size=n)) +
+  geom_point() +
+  facet_wrap(~binwidth, nrow=2)
+```
+
+## Theoretical vs empirical semivariogram
+
+After fitting the model last time we came up with a posterior median of $\sigma^2 = 1.89$ and $l=5.86$ for a square exponential covariance.
+
+. . .
+
+\scriptsize
+$$ \begin{aligned}
+Cov(h) &= \sigma^2 \exp\big(-(h\,l)^2\big) \\
+\gamma(h) 
+  &= \sigma^2 - \sigma^2 \exp\big(-(h\,l)^2\big) \\
+  &= 1.89 - 1.89 \exp\big(-(5.86\, h)^2\big)
+\end{aligned}$$
+
+. . .
+
+```{r echo=FALSE, fig.height=3}
+d_fit = data_frame(h=seq(0,1,length.out = 100)) %>%
+  mutate(gamma = 1.89 - 1.89 * exp(-(5.86*h)^2))
+
+d_emp %>%
+  filter(binwidth %in% c("binwidth=0.05", "binwidth=0.1")) %>%
+  ggplot(aes(x=h, y=gamma)) +
+  geom_point() +
+  geom_line(data=d_fit, color='red') +
+  facet_wrap(~binwidth, ncol=2)
+```
+
+## Variogram features
+
+\begin{center}
+\includegraphics[width=0.7\textwidth]{figs/variogram.png}
+\end{center}
+
+# PM2.5 Example
+
+## FRN Data
+
+Measured PM2.5 data from an EPA monitoring station in Columbia, NJ.
+
+```{r echo=FALSE}
+load("../Lecture 1/data/frn_example.Rdata")
+
+pm25 = pm25 %>%
+  mutate(Date = lubridate::mdy(Date)) %>%
+  mutate(day  = (Date - lubridate::mdy("1/1/2007") + 1) %>% as.integer()) %>% 
+  select(-POC) %>%
+  setNames(., tolower(names(.)))
+
+ggplot(pm25, aes(x=date, y=pm25)) +
+  geom_line() +
+  geom_point()
+```
+
+## FRN Data
+
+\footnotesize
+```{r echo=FALSE}
+pm25 %>% select(-day,-date, date, day) %>% head(n=20) %>% knitr::kable()
+```
+
+## Mean Model
+
+```{r echo=FALSE, fig.height=3.5}
+ggplot(pm25, aes(x=day, y=pm25)) +
+  geom_line() +
+  geom_point() +
+  geom_smooth(method="lm", formula=y~x+I(x^2), se=FALSE, color="red", fullrange=TRUE)
+
+(l=lm(pm25~day+I(day^2), data=pm25))
+l
+```
+
+## Detrended Residuals
+
+```{r echo=FALSE}
+pm25 = pm25 %>%
+  add_residuals(l)
+
+ggplot(pm25, aes(x=day, y=resid)) +
+  geom_line() +
+  geom_point() + 
+  labs(title="Residuals")
+```
+
+## Empirical Variogram
+
+```{r echo=FALSE}
+rbind(
+  pm25 %>% emp_semivariogram(resid, day, bin=TRUE, binwidth=3) %>% mutate(bw = "binwidth=3"),
+  pm25 %>% emp_semivariogram(resid, day, bin=TRUE, binwidth=6) %>% mutate(bw = "binwidth=6")
+) %>%
+  ggplot(aes(x=h, y=gamma, color=n)) +
+    geom_point() +
+    facet_wrap(~bw, ncol=2)
+```
+
+## Empirical Variogram
+
+```{r echo=FALSE}
+rbind(
+  pm25 %>% emp_semivariogram(resid, day, bin=TRUE, binwidth=3, range_max=180) %>% mutate(bw = "binwidth=6"),
+  pm25 %>% emp_semivariogram(resid, day, bin=TRUE, binwidth=6, range_max=180) %>% mutate(bw = "binwidth=9")
+) %>%
+  ggplot(aes(x=h, y=gamma)) +
+    geom_point() +
+    ylim(0,NA) +
+    facet_wrap(~bw, ncol=2)
+```
+
+## Model {.t}
+
+What does the model we are trying to fit actually look like?
+
+. . .
+
+\vspace{2mm}
+
+$$ y(d) = \mu(d) + w(d) + w $$
+where
+
+$$\begin{aligned}
+\mu(d) &= \beta0 + \beta_1\, d +\beta_2\, d^2\\
+w(d) &\sim \mathcal{GP}(0, \Sigma) \\
+w &\sim \mathcal{N}(0, \sigma^2_w)
+\end{aligned}$$
+
+ 
+
+
+## JAGS Model
+
+\scriptoutput
+```{r echo=FALSE}
+gp_exp_model = "model{
+  y ~ dmnorm(mu, inverse(Sigma))
+
+  for (i in 1:N) {
+    mu[i] <- beta[1]+ beta[2] * x[i] + beta[3] * x[i]^2
+  }
+  
+  for (i in 1:(N-1)) {
+    for (j in (i+1):N) {
+      Sigma[i,j] <- sigma2 * exp(- pow(l*d[i,j],2))
+      Sigma[j,i] <- Sigma[i,j]
+    }
+  }
+
+  for (k in 1:N) {
+    Sigma[k,k] <- sigma2 + sigma2_w
+  }
+
+  for (i in 1:3) {
+    beta[i] ~ dt(0, 2.5, 1)
+  }
+  sigma2_w ~ dnorm(10, 1/25) T(0,)
+  sigma2   ~ dnorm(10, 1/25) T(0,)
+  l        ~ dt(0, 2.5, 1) T(0,) 
+}"
+cat(gp_exp_model,"\n")
+```
+
+```{r echo=FALSE}
+if (file.exists("gp_jags.Rdata"))
+{
+  load(file="gp_jags.Rdata")
+} else {
+  m = jags.model(
+    textConnection(gp_exp_model), 
+    data = list(
+      y = pm25$pm25,
+      x = pm25$day,
+      d = dist(pm25$day) %>% as.matrix(),
+      N = nrow(pm25)
+    ),
+    quiet = TRUE
+  )
+
+  update(m, n.iter=5000)#, progress.bar="none")
+
+  exp_cov_coda = coda.samples(
+    m, variable.names=c("beta", "sigma2", "l", "sigma2_w"),
+    n.iter=10000, thin=10#, progress.bar="none"
+  )
+  save(exp_cov_coda, file="gp_jags.Rdata")
+}
+```
+
+## Posterior - Betas
+
+```{r echo=FALSE}
+betas = get_coda_parameter(exp_cov_coda, "beta")
+plot(betas)
+```
+
+
+## Posterior - Covariance Parameters
+
+```{r echo=FALSE}
+param = get_coda_parameter(exp_cov_coda, "^[^b]")
+plot(param)
+```
+
+## Posterior 
+
+```{r echo=FALSE}
+(post = rbind(
+  post_summary(betas),
+  post_summary(param)
+))
+```
+
+
+## Fitted Variogram 
+
+
+## Empirical + Fitted Variogram 
+
+```{r echo=FALSE, fig.height=4}
+l = post %>% filter(param == 'l') %>% select(post_med) %>% unlist()
+sigma2 = post %>% filter(param == 'sigma2') %>% select(post_med) %>% unlist()
+sigma2_w = post %>% filter(param == 'sigma2_w') %>% select(post_med) %>% unlist()
+
+beta0 = post %>% filter(param == 'beta[1]') %>% select(post_med) %>% unlist()
+beta1 = post %>% filter(param == 'beta[2]') %>% select(post_med) %>% unlist()
+beta2 = post %>% filter(param == 'beta[3]') %>% select(post_med) %>% unlist()
+
+pm25 = pm25 %>% mutate(bayes_resid = pm25 - beta0 - beta1 * day - beta2 * day^2)
+
+d_fit = data_frame(h=1:180) %>% mutate(gamma = sq_exp_sv(h, sigma2, l, sigma2_w))
+
+rbind(
+  pm25 %>% emp_semivariogram(bayes_resid, day, bin=TRUE, binwidth=3, range_max=180) %>% mutate(bw = "binwidth=3"),
+  pm25 %>% emp_semivariogram(bayes_resid, day, bin=TRUE, binwidth=6, range_max=180) %>% mutate(bw = "binwidth=6")
+) %>%
+  ggplot(aes(x=h, y=gamma)) +
+    geom_point() +
+    ylim(0,NA) +
+    geom_line(data=d_fit, color='red') +
+    facet_wrap(~bw, ncol=2) 
+```
+
+
+## Fitted Model + Predictions
+
+```{r echo=FALSE}
+reps=1000
+
+x = pm25$day
+y = pm25$pm25
+x_pred = 1:365 + rnorm(365, 0.01)
+
+mu = beta0 + beta1*x + beta2*x^2
+mu_pred = beta0 + beta1*x_pred + beta2*x_pred^2
+
+dist_o = rdist(x)
+dist_p = rdist(x_pred)
+dist_op = rdist(x, x_pred)
+dist_po = t(dist_op)
+  
+cov_o  = sq_exp_cov(dist_o,  sigma2 = sigma2, l = l, sigma2_w = sigma2_w)
+cov_p  = sq_exp_cov(dist_p,  sigma2 = sigma2, l = l, sigma2_w = sigma2_w)
+cov_op = sq_exp_cov(dist_op, sigma2 = sigma2, l = l, sigma2_w = sigma2_w)
+cov_po = sq_exp_cov(dist_po, sigma2 = sigma2, l = l, sigma2_w = sigma2_w)
+
+cond_cov = cov_p - cov_po %*% solve(cov_o) %*% cov_op
+cond_mu  = mu_pred + cov_po %*% solve(cov_o) %*% (y - mu)
+  
+pred = cond_mu %*% matrix(1, ncol=reps) + t(chol(cond_cov)) %*% matrix(rnorm(length(x_pred)*reps), ncol=reps)
+
+pred_df = pred %>% t() %>% post_summary() %>% mutate(day=x_pred)
+
+ggplot(pm25, aes(x=day, y=pm25)) +
+  geom_line() +
+  geom_point() +
+  geom_ribbon(data=pred_df, aes(ymin=post_lower,ymax=post_upper, x=day, y=post_med), fill="red", alpha=0.1)+
+  geom_line(data=pred_df, aes(y=post_mean), color='red', size=1)
+```
+
+## Empirical Variogram (again)
+
+```{r echo=FALSE, fig.height=4}
+rbind(
+  pm25 %>% emp_semivariogram(bayes_resid, day, bin=TRUE, binwidth=3, range_max=180) %>% mutate(bw = "binwidth=3"),
+  pm25 %>% emp_semivariogram(bayes_resid, day, bin=TRUE, binwidth=6, range_max=180) %>% mutate(bw = "binwidth=6")
+) %>%
+  ggplot(aes(x=h, y=gamma)) +
+    geom_point() +
+    ylim(0,NA) +
+    facet_wrap(~bw, ncol=2) 
+```
+
+
+## Empirical Variogram Model
+
+```{r echo=FALSE, fig.height=4}
+sigma2_w = 9
+sigma2 = 3
+l = sqrt(3)/3
+
+beta0 = 12.9644351       
+beta1 = -0.0724639
+beta2 = 0.0001751
+
+pm25 = pm25 %>% mutate(bayes_resid = pm25 - beta0 - beta1 * day - beta2 * day^2)
+
+d_fit = data_frame(h=1:180) %>% mutate(gamma = sq_exp_sv(h, sigma2, l, sigma2_w))
+
+rbind(
+  pm25 %>% emp_semivariogram(bayes_resid, day, bin=TRUE, binwidth=3, range_max=180) %>% mutate(bw = "binwidth=3"),
+  pm25 %>% emp_semivariogram(bayes_resid, day, bin=TRUE, binwidth=6, range_max=180) %>% mutate(bw = "binwidth=6")
+) %>%
+  ggplot(aes(x=h, y=gamma)) +
+    geom_point() +
+    ylim(0,NA) +
+    geom_line(data=d_fit, color='blue') +
+    facet_wrap(~bw, ncol=2) 
+```
+
+## Empirical Variogram Model + Predictions
+
+```{r echo=FALSE}
+reps=1000
+
+x = pm25$day
+y = pm25$pm25
+x_pred = 1:365 + rnorm(365, 0.01)
+
+mu = beta0 + beta1*x + beta2*x^2
+mu_pred = beta0 + beta1*x_pred + beta2*x_pred^2
+
+dist_o = rdist(x)
+dist_p = rdist(x_pred)
+dist_op = rdist(x, x_pred)
+dist_po = t(dist_op)
+  
+cov_o  = sq_exp_cov(dist_o,  sigma2 = sigma2, l = l, sigma2_w = sigma2_w)
+cov_p  = sq_exp_cov(dist_p,  sigma2 = sigma2, l = l, sigma2_w = sigma2_w)
+cov_op = sq_exp_cov(dist_op, sigma2 = sigma2, l = l, sigma2_w = sigma2_w)
+cov_po = sq_exp_cov(dist_po, sigma2 = sigma2, l = l, sigma2_w = sigma2_w)
+
+cond_cov = cov_p - cov_po %*% solve(cov_o) %*% cov_op
+cond_mu  = mu_pred + cov_po %*% solve(cov_o) %*% (y - mu)
+  
+pred = cond_mu %*% matrix(1, ncol=reps) + t(chol(cond_cov)) %*% matrix(rnorm(length(x_pred)*reps), ncol=reps)
+
+pred_df_emp = pred %>% t() %>% post_summary() %>% mutate(day=x_pred)
+
+ggplot(pm25, aes(x=day, y=pm25)) +
+  geom_line() +
+  geom_point() +
+  #geom_ribbon(data=pred_df, aes(ymin=post_lower,ymax=post_upper, x=day, y=post_med), fill="red", alpha=0.1)+
+  geom_line(data=pred_df, aes(y=post_mean), color='red', size=1) +
+  geom_line(data=pred_df_emp, aes(y=post_mean), color='blue', size=1) +
+  geom_ribbon(data=pred_df, aes(ymin=post_lower,ymax=post_upper, x=day, y=post_med), fill="red", alpha=0.1)+
+  geom_ribbon(data=pred_df_emp, aes(ymin=post_lower,ymax=post_upper, x=day, y=post_med), fill="blue", alpha=0.1)
+``` 
+
+

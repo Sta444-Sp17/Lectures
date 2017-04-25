@@ -1,0 +1,714 @@
+
+---
+title: "Lecture 12" 
+subtitle: "Gaussian Process Models"
+author: "Colin Rundel"
+date: "02/27/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE)
+options(width=70)
+
+set.seed(20170227)
+
+library(magrittr)
+library(dplyr)
+library(modelr)
+library(ggplot2)
+library(tidyr)
+library(rjags)
+library(stringr)
+library(gridExtra)
+library(readr)
+library(purrr)
+library(forcats)
+library(forecast)
+library(astsa)
+library(fields)
+
+theme_set(
+  theme_bw()  
+)
+
+get_coda_parameter = function(coda, pattern)
+{
+  w = coda[[1]] %>% colnames() %>% str_detect(pattern)
+  coda[[1]][,w,drop=FALSE]
+}
+
+post_summary = function(m, ci_width=0.95)
+{
+  d = data_frame(
+    post_mean  = apply(m, 2, mean),
+    post_med   = apply(m, 2, median),
+    post_lower = apply(m, 2, quantile, probs=(1-ci_width)/2),
+    post_upper = apply(m, 2, quantile, probs=1 - (1-ci_width)/2)
+  )
+  
+  if (!is.null(colnames(m)))
+    d = d %>% mutate(param = colnames(m)) %>% select(param,post_mean:post_upper)
+  
+  d
+}
+
+strip_attrs = function(obj)
+{
+  attributes(obj) = NULL
+  obj
+}
+
+strip_class = function(obj)
+{
+  attr(obj,"class") = NULL
+  obj
+}
+```
+
+# Multivariate Normal
+
+## Multivariate Normal Distribution {.t}
+
+For an $n$-dimension multivate normal distribution with covariance $\bm{\Sigma}$ (positive semidefinite) can be written as
+
+$$
+\underset{n \times 1}{\bm{Y}} \sim N(\underset{n \times 1}{\bm{\mu}}, \; \underset{n \times n}{\bm{\Sigma}}) \text{   where   } \{\bm{\Sigma}\}_{ij} = \sigma^2_{ij} = \rho_{ij} \, \sigma_{i} \, \sigma_{j}
+$$
+
+\vspace{2mm}
+
+$$
+\begin{pmatrix}
+Y_1\\ \vdots\\ Y_n
+\end{pmatrix}
+\sim N\left(
+\begin{pmatrix}
+\mu_1\\ \vdots\\ \mu_n
+\end{pmatrix}, \,
+\begin{pmatrix}
+\rho_{11}\sigma_1\sigma_1 & \cdots & \rho_{1n}\sigma_1\sigma_n \\
+\vdots & \ddots & \vdots \\
+\rho_{n1}\sigma_n\sigma_1 & \cdots & \rho_{nn}\sigma_n\sigma_n \\
+\end{pmatrix}
+\right)
+$$
+
+
+## Density {.t}
+
+For the $n$ dimensional multivate normal given on the last slide, its density is given by
+
+$$
+(2\pi)^{-n/2} \; \det(\bm{\Sigma})^{-1/2} \; \exp{\left(-\frac{1}{2} \underset{1 \times n}{(\bm{Y}-\bm{\mu})'} \underset{n \times n}{\bm{\Sigma}^{-1}} \underset{n \times 1}{(\bm{Y}-\bm{\mu})}\right)} 
+$$
+
+and its log density is given by
+
+$$
+-\frac{n}{2} \log 2\pi - \frac{1}{2} \log \det(\bm{\Sigma}) - -\frac{1}{2} \underset{1 \times n}{(\bm{Y}-\bm{\mu})'} \underset{n \times n}{\bm{\Sigma}^{-1}} \underset{n \times 1}{(\bm{Y}-\bm{\mu})}
+$$
+
+
+## Sampling {.t .build}
+
+To generate draws from an $n$-dimensional multivate normal with mean $\bm\mu$ and covariance matrix $\bm\Sigma$, 
+
+\vspace{4mm}
+
+. . .
+
+* Find a matrix $\bm{A}$ such that $\bm\Sigma = \bm{A}\,\bm{A}^t$, most often we use $\bm{A} = \text{Chol}(\bm\Sigma)$
+
+. . .
+
+\vspace{2mm}
+
+* Draw $n$ iid unit normals ($\mathcal{N}(0,1)$) as $\bm{z}$ 
+
+. . .
+
+\vspace{2mm}
+
+* Construct multivariate normal draws using
+$$ \bm{Y} = \bm\mu + \bm{A} \, \bm{z} $$
+
+## Bivariate Example
+
+\scriptsize
+$$ \bm{\mu} = \begin{pmatrix}0 \\ 0\end{pmatrix} \qquad \bm{\Sigma} = \begin{pmatrix}1 & \rho \\ \rho & 1 \end{pmatrix}$$
+
+```{r echo=FALSE}
+library(mvtnorm)
+rbind(
+  cbind(param="rho=0.9",  rmvnorm(100, sigma = matrix(c(1,0.9,0.9,1),2))   %>% as.data.frame() %>% setNames(c("x","y")) ),
+  cbind(param="rho=0.7",  rmvnorm(100, sigma = matrix(c(1,0.7,0.7,1),2))   %>% as.data.frame() %>% setNames(c("x","y")) ),
+  cbind(param="rho=0.5",  rmvnorm(100, sigma = matrix(c(1,0.5,0.5,1),2))   %>% as.data.frame() %>% setNames(c("x","y")) ),
+  cbind(param="rho=0.1",  rmvnorm(100, sigma = matrix(c(1,0.1,0.1,1),2))   %>% as.data.frame() %>% setNames(c("x","y")) ),
+  cbind(param="rho=-0.9", rmvnorm(100, sigma = matrix(c(1,-0.9,-0.9,1),2)) %>% as.data.frame() %>% setNames(c("x","y")) ),
+  cbind(param="rho=-0.7", rmvnorm(100, sigma = matrix(c(1,-0.7,-0.7,1),2)) %>% as.data.frame() %>% setNames(c("x","y")) ),
+  cbind(param="rho=-0.5", rmvnorm(100, sigma = matrix(c(1,-0.5,-0.5,1),2)) %>% as.data.frame() %>% setNames(c("x","y")) ),
+  cbind(param="rho=-0.1", rmvnorm(100, sigma = matrix(c(1,-0.1,-0.1,1),2)) %>% as.data.frame() %>% setNames(c("x","y")) )
+) %>%
+  ggplot(aes(x=x,y=y)) +
+    geom_density_2d() +
+    geom_point(alpha=0.2) +
+    facet_wrap(~param, ncol=4)
+```
+
+## Marginal distributions
+
+\small
+
+\textbf{Proposition} - For an $n$-dimensional multivate normal with mean $\bm\mu$ and covariance matrix $\bm\Sigma$, any of the possible marginal distributions will also (multivariate) normal.
+
+. . .
+
+\vspace{2mm}
+
+For a univariate marginal distribution,
+$$ y_i = \mathcal{N}(\mu_i,\,\gamma_{ii}) $$
+
+. . .
+
+For a bivariate marginal distribution,
+$$ \bm{y}_{ij} = \mathcal{N}\left( \begin{pmatrix}\mu_i \\ \mu_j \end{pmatrix},\; \begin{pmatrix} \gamma_{ii} & \gamma_{ij} \\ \gamma_{ji} & \gamma_{jj} \end{pmatrix} \right) $$
+
+. . .
+
+For a $k$-dimensional marginal distribution, 
+
+$$ 
+\bm{y}_{i_1,\cdots,i_k} = 
+  \mathcal{N}\left( 
+    \begin{pmatrix}\mu_{i_1} \\ \vdots \\ \mu_j \end{pmatrix},\; 
+    \begin{pmatrix} 
+      \gamma_{i_1i_1}  & \cdots & \gamma_{i_1 i_k} \\ 
+      \vdots           & \ddots & \vdots \\
+      \gamma_{i_k i_1} & \cdots & \gamma_{i_k i_k} \end{pmatrix} 
+  \right) 
+$$
+ 
+
+## Conditional Distributions {.t}
+ 
+If we partition the $n$-dimensions into two pieces such that $\bm{Y} = (\bm{Y}_1,\, \bm{Y}_2)^t$ then
+\footnotesize
+$$
+\underset{n \times 1}{\bm{Y}} \sim \mathcal{N}\left(
+  \underset{n \times 1}{\begin{pmatrix}\bm{\mu}_1 \\ \bm{\mu}_2\end{pmatrix}},\, 
+  \underset{n \times n}{\begin{pmatrix} 
+    \bm{\Sigma}_{11} & \bm{\Sigma}_{12} \\ 
+    \bm{\Sigma}_{21} & \bm{\Sigma}_{22} 
+  \end{pmatrix}}
+\right)
+$$
+$$ \begin{aligned}
+\underset{k \times 1}{\bm{Y}_1} &\sim \mathcal{N}(\underset{k \times 1}{\bm{\mu}_1},\, \underset{k \times k}{\bm{\Sigma}_{11}}) \\ 
+\underset{n-k \times 1}{\bm{Y}_2} &\sim \mathcal{N}(\underset{n-k \times 1}{\bm{\mu}_2},\, \underset{n-k \times n-k}{\bm{\Sigma}_{22}})
+\end{aligned} $$
+
+
+. . .
+
+\normalsize \vspace{2mm}
+then the conditional distributions are given by 
+
+\footnotesize
+$$\begin{aligned}
+\bm Y_1 ~|~ \bm{Y}_2 = \bm{a} ~&\sim \mathcal{N}(\bm\mu_1 + \bm\Sigma_{12} \, \bm\Sigma_{22}^{-1} \, (\bm{a} - \bm\mu_2),~ \bm\Sigma_{11}-\bm\Sigma_{12}\,\bm\Sigma_{22}^{-1} \, \bm\Sigma_{21}) \\
+\\
+\bm Y_2 ~|~ \bm{Y}_1 = \bm{b} ~&\sim \mathcal{N}(\bm\mu_2 + \bm\Sigma_{21} \, \bm\Sigma_{11}^{-1} \, (\bm{b} - \bm\mu_1),~ \bm\Sigma_{22}-\bm\Sigma_{21}\,\bm\Sigma_{11}^{-1} \, \bm\Sigma_{21})
+\end{aligned}$$
+
+## Gaussian Processes {.t}
+
+From Shumway,
+
+> A process, $\bm{Y} = \{Y_t ~:~ t \in T\}$, is said to be a Gaussian process if all possible finite dimensional vectors $\bm{y} = (y_{t_1},y_{t_2},...,y_{t_n})^t$, for every collection of time points $t_1, t_2, \ldots , t_n$, and every positive integer $n$, have a multivariate normal distribution.
+
+. . .
+
+So far we have only looked at examples of time series where $T$ is discete (and evenly spaces & contiguous), it turns out things get a lot more interesting when we explore the case where $T$ is defined on a *continuous* space  (e.g. $\mathbb{R}$ or some subset of $\mathbb{R}$).
+
+
+# Gaussian Process Regression
+
+## Parameterizing a Gaussian Process {.t}
+
+Imagine we have a Gaussian process defined such that $\bm{Y} = \{Y_t ~:~ t \in [0,1]\}$, 
+
+. . .
+
+* We now have an uncountably infinite set of possible $Y_t$s.
+
+. . .
+
+* We will only have a (small) finite number of observations $Y_1, \ldots, Y_n$ with which to say something useful about this infinite dimension process.
+
+. . .
+
+* The unconstrained covariance matrix for the observed data can have up to $n(n+1)/2$ unique values ($p >>> n$) 
+
+. . .
+
+* Necessary to make some simplifying assumptions:
+
+    * Stationarity
+
+    * Simple parameterization of $\Sigma$
+
+
+## Covariance Functions
+
+More on these next week, but for now some simple / common examples
+
+
+Exponential Covariance:
+$$ \Sigma(y_{t},y_{t'}) = \sigma^2 \exp\big(-|t-t'| \; l\,\big) $$
+
+Squared Exponential Covariance:
+$$ \Sigma(y_{t},y_{t'}) = \sigma^2 \exp\big(-(|t-t'| \; l\,)^2\big) $$
+
+Powered Exponential Covariance ($p \in (0,2]$):
+$$ \Sigma(y_{t},y_{t'}) = \sigma^2 \exp\big(-(|t-t'| \; l\,)^p\big) $$
+
+## Covariance Function Decay
+
+```{r echo=FALSE, fig.height=4.5}
+exp_cov = function(d, sigma2=1, l=1) sigma2 * exp(-abs(d)*l) 
+sq_exp_cov = function(d, sigma2=1, l=1) sigma2 * exp(-(abs(d)*l)^2)
+pow_exp_cov = function(d, sigma2=1, l=1, p=2) sigma2 * exp(-(abs(d)*l)^p)
+
+vals = expand.grid(
+  d = seq(0, 1, length.out = 100),
+  l = seq(0, 10, length.out = 11)
+) %>%
+  as.data.frame() %>%
+  tbl_df()
+
+covs = rbind(
+  cbind(data_frame(func="exponential covariance"), by_row(vals, function(x) exp_cov(x$d, l=x$l), .collate="rows", .to="corr")),
+  cbind(data_frame(func="square exponential covariance"), by_row(vals, function(x) sq_exp_cov(x$d, l=x$l), .collate="rows", .to="corr"))
+) %>%
+  mutate(l = as.factor(round(l,1)))
+
+ggplot(covs, aes(x=d, y=corr, color=l)) +
+  geom_line() +
+  facet_wrap(~func, ncol=2)
+```
+
+
+## Example
+
+```{r echo=FALSE, fig.align="center"}
+y_f = function(x) log(x + 0.1) + sin(5*pi*x)
+
+d_true = d = data_frame(
+  t = seq(0,1,length.out = 1000)
+) %>%
+  mutate(y = y_f(t) )
+
+n = 15
+d = data_frame(
+  t = seq(0,1,length.out = n) + rnorm(n, sd=0.04)
+) %>%
+  mutate(t = t - min(t)) %>%
+  mutate(t = t / max(t)) %>%
+  mutate(y = y_f(t) + rnorm(n,sd=0.1))
+
+base = ggplot(d, aes(x=t, y=y)) +
+  geom_point(size=3) +
+  geom_line(data=d_true, color="blue", alpha=0.5, size=1)
+base
+
+save(d, d_true, y_f, base, file="lec12_ex.Rdata")
+```
+
+## Prediction {.t}
+
+Our example has 15 observations which we would like to use as the basis for predicting $Y_t$ at other values of $t$ (say a grid of values from 0 to 1).
+
+\vspace{3mm}
+
+. . .
+
+For now lets use a square exponential covariance with $\sigma^2 = 10$ and $l=10$ 
+
+\vspace{3mm}
+
+. . .
+
+We therefore want to sample from $\bm{Y}_{pred} | \bm{Y}_{obs}$.
+
+$$\bm Y_{pred} ~|~ \bm{Y}_obs = \bm{y} ~\sim \mathcal{N}(\bm\Sigma_{po} \, \bm\Sigma_{obs}^{-1} \, \bm{y},~ \bm\Sigma_{pred}-\bm\Sigma_{po}\,\bm\Sigma_{pred}^{-1} \, \bm\Sigma_{op})$$
+
+```{r echo=FALSE}
+cond_pred = function(d_pred, d, cov, sigma2, l, reps=1000)
+{
+  dist_o = rdist(d$t)
+  dist_p = rdist(d_pred$t)
+  dist_op = rdist(d$t, d_pred$t)
+  dist_po = rdist(d_pred$t, d$t)
+  
+  cov_o  = cov(dist_o, sigma2 = sigma2, l = l)
+  cov_p  = cov(dist_p, sigma2 = sigma2, l = l)
+  cov_op = cov(dist_op, sigma2 = sigma2, l = l)
+  cov_po = cov(dist_po, sigma2 = sigma2, l = l)
+  
+  # Quick fix for singularity issues
+  diag(cov_o) = diag(cov_o) + 0.01 
+  diag(cov_p) = diag(cov_p) + 0.01 
+  
+  cond_cov = cov_p - cov_po %*% solve(cov_o) %*% cov_op
+  cond_mu  = cov_po %*% solve(cov_o) %*% (d$y)
+  
+  cond_mu %*% matrix(1, ncol=reps) + t(chol(cond_cov)) %*% matrix(rnorm(nrow(d_pred)*reps), ncol=reps)
+}
+
+d_pred= data_frame(t = seq(0,1,length.out = 100))
+y_post = cond_pred(d_pred, d, cov=sq_exp_cov, sigma2 = 10, l = 10, reps=1000)
+
+d_pred = cbind(
+  d_pred,
+  y_post[,1:5] %>% as.data.frame() %>% setNames(paste0("y",1:5)),
+  post_summary(t(y_post))
+)
+```
+
+## Draw 1
+
+```{r echo=FALSE}
+base + 
+  geom_line(data=d_pred, color='red', aes(y=y1), size=1)
+```
+
+## Draw 2
+
+```{r echo=FALSE}
+base + 
+  geom_line(data=d_pred, color='red', aes(y=y1), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y2), alpha=1.0, size=1)
+```
+
+## Draw 3
+
+```{r echo=FALSE}
+base + 
+  geom_line(data=d_pred, color='red', aes(y=y1), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y2), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y3), alpha=1.0, size=1)
+```
+
+## Draw 4
+
+```{r echo=FALSE}
+base + 
+  geom_line(data=d_pred, color='red', aes(y=y1), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y2), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y3), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y4), alpha=1.0, size=1)
+```
+
+## Draw 5
+
+```{r echo=FALSE}
+base + 
+  geom_line(data=d_pred, color='red', aes(y=y1), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y2), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y3), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y4), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y5), alpha=1.0, size=1)
+```
+
+## Many draws later
+
+```{r echo=FALSE}
+base + 
+  geom_line(data=d_pred, color='red', aes(y=y1), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y2), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y3), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y4), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y5), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=post_mean), size=1) +
+  geom_ribbon(data=d_pred, fill='red', alpha=0.1, aes(ymin=post_lower, ymax=post_upper, y=post_mean))
+```
+
+
+## Exponential Covariance
+
+```{r echo=FALSE}
+d_pred = data_frame(t = seq(0,1,length.out = 100))
+y_post = cond_pred(d_pred, d, cov = exp_cov, sigma2 = 10, l = 10, reps=1000)
+
+d_pred = cbind(
+  d_pred,
+  y_post[,1:5] %>% as.data.frame() %>% setNames(paste0("y",1:5)),
+  post_summary(t(y_post))
+)
+
+base + 
+  geom_line(data=d_pred, color='red', aes(y=post_mean), size=1) +
+  geom_line(data=d_pred, color='red', aes(y=y1), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y2), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y3), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y4), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y5), alpha=0.4, size=0.5) +
+  geom_ribbon(data=d_pred, fill='red', alpha=0.1, aes(ymin=post_lower, ymax=post_upper, y=post_mean))
+```
+
+## Powered Exponential Covariance ($p=1.5$)
+
+```{r echo=FALSE}
+d_pred = data_frame(t = seq(0,1,length.out = 100))
+
+cov_15 = function(d, sigma2, l) pow_exp_cov(d,sigma2,l, p=1.5)
+
+y_post = cond_pred(d_pred, d, cov = cov_15, sigma2 = 10, l = 10, reps=1000)
+
+d_pred = cbind(
+  d_pred,
+  y_post[,1:5] %>% as.data.frame() %>% setNames(paste0("y",1:5)),
+  post_summary(t(y_post))
+)
+
+base + 
+  geom_line(data=d_pred, color='red', aes(y=post_mean), size=1) +
+  geom_line(data=d_pred, color='red', aes(y=y1), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y2), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y3), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y4), alpha=0.4, size=0.5) +
+  geom_line(data=d_pred, color='red', aes(y=y5), alpha=0.4, size=0.5) +
+  geom_ribbon(data=d_pred, fill='red', alpha=0.1, aes(ymin=post_lower, ymax=post_upper, y=post_mean))
+```
+
+## Back to the square exponential
+
+```{r echo=FALSE}
+d_pred = data_frame(t = seq(0,1,length.out = 100))
+
+y_post = cond_pred(d_pred, d, cov = sq_exp_cov, sigma2 = 10, l = 10, reps=1000)
+
+d_pred = cbind(
+  d_pred,
+  post_summary(t(y_post))
+)
+
+base + 
+  geom_line(data=d_pred, color='red', aes(y=post_mean), size=1) +
+  geom_ribbon(data=d_pred, fill='red', alpha=0.1, aes(ymin=post_lower, ymax=post_upper, y=post_mean))
+```
+
+## Changing the range ($l$)
+
+```{r echo=FALSE}
+d_pred = data_frame(t = seq(0,1,length.out = 100))
+
+d_pred_l = rbind(
+  cbind(
+    data_frame(cov="Sq Exp Cov - sigma2=10, l=5"),
+    d_pred,
+    cond_pred(d_pred, d, cov = sq_exp_cov, sigma2 = 10, l = 5, reps=1000) %>% t() %>% post_summary()
+  ),
+  cbind(
+    data_frame(cov="Sq Exp Cov - sigma2=10, l=7.5"),
+    d_pred,
+    cond_pred(d_pred, d, cov = sq_exp_cov, sigma2 = 10, l = 7.5, reps=1000) %>% t() %>% post_summary()
+  ),
+  cbind(
+    data_frame(cov="Sq Exp Cov - sigma2=10, l=12.5"),
+    d_pred,
+    cond_pred(d_pred, d, cov = sq_exp_cov, sigma2 = 10, l = 12.5, reps=1000) %>% t() %>% post_summary()
+  ),
+  cbind(
+    data_frame(cov="Sq Exp Cov - sigma2=10, l=15"),
+    d_pred,
+    cond_pred(d_pred, d, cov = sq_exp_cov, sigma2 = 10, l = 15, reps=1000) %>% t() %>% post_summary()
+  )
+)
+
+base + 
+  geom_line(data=d_pred_l, color='red', aes(y=post_mean), size=1) +
+  geom_ribbon(data=d_pred_l, fill='red', alpha=0.1, aes(ymin=post_lower, ymax=post_upper, y=post_mean)) +
+  facet_wrap(~cov)
+```
+
+## Effective Range {.t}
+
+For the square exponential covariance
+$$ \begin{aligned} 
+Cov(d) &= \sigma^2 \exp\left(-(l \cdot d)^2\right) \\
+Corr(d) &= \exp\left(-(l \cdot d)^2\right)
+\end{aligned} $$
+
+we would like to know, for a given value of $l$, beyond what distance apart must observations be to have a correlation less than $0.05$? 
+
+<!--
+$$ \begin{aligned}
+\exp\left(-(l \cdot d)^2\right) < 0.05 \\
+-(l \cdot d)^2 < \log 0.05 \\
+l \cdot d < \sqrt{3} \\
+d < \sqrt{3} / l
+\end{aligned} $$
+-->
+
+
+## Changing the scale ($\sigma^2$)
+
+```{r echo=FALSE}
+d_pred = data_frame(t = seq(0,1,length.out = 100))
+
+d_pred_s = rbind(
+  cbind(
+    data_frame(cov="Sq Exp Cov - sigma2=5, l=10"),
+    d_pred,
+    cond_pred(d_pred, d, cov = sq_exp_cov, sigma2 = 5, l = 10, reps=1000) %>% t() %>% post_summary()
+  ),
+  cbind(
+    data_frame(cov="Sq Exp Cov - sigma2=15, l=10"),
+    d_pred,
+    cond_pred(d_pred, d, cov = sq_exp_cov, sigma2 = 15, l = 10, reps=1000) %>% t() %>% post_summary()
+  ),
+  cbind(
+    data_frame(cov="Sq Exp Cov - sigma2=5, l=5"),
+    d_pred,
+    cond_pred(d_pred, d, cov = sq_exp_cov, sigma2 = 5, l = 5, reps=1000) %>% t() %>% post_summary()
+  ),
+  cbind(
+    data_frame(cov="Sq Exp Cov - sigma2=15, l=5"),
+    d_pred,
+    cond_pred(d_pred, d, cov = sq_exp_cov, sigma2 = 15, l = 5, reps=1000) %>% t() %>% post_summary()
+  )
+) %>%
+  mutate(cov = as_factor(cov))
+
+base + 
+  geom_line(data=d_pred_s, color='red', aes(y=post_mean), size=1) +
+  geom_ribbon(data=d_pred_s, fill='red', alpha=0.1, aes(ymin=post_lower, ymax=post_upper, y=post_mean)) +
+  facet_wrap(~cov)
+```
+
+
+## Fitting
+
+```{r echo=FALSE}
+gp_sq_exp_model = "model{
+  y ~ dmnorm(mu, inverse(Sigma))
+
+  for (i in 1:N) {
+    mu[i] <- 0
+  }
+
+  for (i in 1:(N-1)) {
+    for (j in (i+1):N) {
+      Sigma[i,j] <- sigma2 * exp(- pow(l*d[i,j],2))
+      Sigma[j,i] <- Sigma[i,j]
+    }
+  }
+
+  for (k in 1:N) {
+    Sigma[k,k] <- sigma2 + 0.01
+  }
+
+  sigma2   ~ dlnorm(0, 1)
+  l        ~ dt(0, 2.5, 1) T(0,) # Half-cauchy(0,2.5)
+}"
+cat(gp_sq_exp_model,"\n")
+```
+
+```{r echo=FALSE}
+
+if (file.exists("gp_jags.Rdata"))
+{
+  load(file="gp_jags.Rdata")
+} else {
+  m = jags.model(
+    textConnection(gp_sq_exp_model), 
+    data = list(
+      y = (d$y),
+      d = dist(d$t) %>% as.matrix(),
+      N = length(d$y)
+    ),
+    quiet = TRUE
+  )
+
+  update(m, n.iter=5000, progress.bar="none")
+
+  sq_exp_cov_coda = coda.samples(
+    m, variable.names=c("sigma2", "l", "sigma2_w"),
+    n.iter=10000, thin=10, progress.bar="none"
+  )
+  save(sq_exp_cov_coda, file="gp_jags.Rdata")
+}
+```
+
+## Trace plots
+
+```{r echo=FALSE, fig.height=4.2}
+par(mar=c(3,4,2,2))
+plot(sq_exp_cov_coda)
+```
+
+\footnotesize
+```{r echo=FALSE}
+sq_exp_cov_coda %>% get_coda_parameter(".*") %>% post_summary() %>% knitr::kable()
+```
+
+## Fitted models
+
+```{r echo=FALSE}
+d_pred = data_frame(t = seq(0,1,length.out = 100))
+
+d_pred_s = rbind(
+  cbind(
+    data_frame(cov="Post Mean Model - sigma2=2.32, l=6.03"),
+    d_pred,
+    cond_pred(d_pred, d, cov = sq_exp_cov, l = 6.03, sigma2 = 2.32, reps=1000) %>% t() %>% post_summary()
+  ),
+  cbind(
+    data_frame(cov="Post Median Model - sigma2=1.89, l=5.86"),
+    d_pred,
+    cond_pred(d_pred, d, cov = sq_exp_cov, l = 5.86, sigma2 = 1.89, reps=1000) %>% t() %>% post_summary()
+  )
+)
+
+base + 
+  geom_line(data=d_pred_s, color='red', aes(y=post_mean), size=1) +
+  geom_ribbon(data=d_pred_s, fill='red', alpha=0.1, aes(ymin=post_lower, ymax=post_upper, y=post_mean)) +
+  facet_wrap(~cov)
+```
+
+## Forcasting
+
+```{r echo=FALSE}
+d_pred = data_frame(t = seq(0,1.5,length.out = 150))
+
+d_pred_s = rbind(
+  cbind(
+    data_frame(cov="Post Mean Model - sigma2=2.32, l=6.03"),
+    d_pred,
+    cond_pred(d_pred, d, cov = sq_exp_cov, l = 6.03, sigma2 = 2.32, reps=1000) %>% t() %>% post_summary()
+  ),
+  cbind(
+    data_frame(cov="Post Median Model - sigma2=1.89, l=5.86"),
+    d_pred,
+    cond_pred(d_pred, d, cov = sq_exp_cov, l = 5.86, sigma2 = 1.89, reps=1000) %>% t() %>% post_summary()
+  )
+)
+
+base + 
+  geom_line(data=d_pred_s, color='red', aes(y=post_mean), size=1) +
+  geom_ribbon(data=d_pred_s, fill='red', alpha=0.1, aes(ymin=post_lower, ymax=post_upper, y=post_mean)) +
+  facet_wrap(~cov)
+```

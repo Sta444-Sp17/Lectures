@@ -1,0 +1,114 @@
+Model A (selection on intercept)
+ {for (t in 1:60) {
+# take 1st diffs of actual series
+z[t] <- y[t+1]-y[t]
+# tau[1] represents measurement error
+                                   z[t] ~ dnorm(mu[t],tau[1])
+                                   z.new[t] ~ dnorm(mu[t],tau[1])
+                                   e.lc[t] <- pow(z[t]-z.new[t],2)
+                                   u[t] ~ dnorm(0,tau[2])}
+# one step ahead forecasts
+for (t in 2:60){             z.one[t] ~ dnorm(mu[t-1],tau[1])
+                                    y.one[t+1] <- z.one[t] + y[t]
+                                    D[t] <- pow(y.one[t+1]-y[t+1],2)}
+for (t in 3:60) { mu[t]  <- u[t]-theta[1]*u[t-1] -theta[2]*u[t-2]           + J*lambda + rho*z[t-1] }
+                         mu[2] <- u[2]-theta[1]*u[1] -theta[2]*u.0                + J*lambda + rho*z[1] 
+                         mu[1] <- u[1]-theta[1]*u.0 -theta[2]*u.minus1       + J*lambda + rho*z.0 
+# priors for innovation and measurement error variances
+tau[2] ~ dgamma(1,0.001) 
+pi ~ dbeta(1,B)
+B ~ dunif(1,1000)
+tau[1] <- tau[2]/pi
+# latent errors and series values
+u.0 ~ dt(0,tau.L,nu); u.minus1 ~ dt(0,tau.L,nu)
+tau.L <- 0.2*tau[2]
+nu <- 2
+z.0 ~ dnorm(0,0.001)
+# total errors of prediction within series
+  E[1] <- sum(D[2:60])
+  E[2] <- sum(e.lc[])
+# forecasting equations
+for (t in 61:67) {z[t] <- J*lambda + rho*z[t-1]+u[t]-theta[1]*u[t-1]-theta[2]*u[t-2]
+                          u[t] ~ dnorm(0,tau[2])
+# forecasts in undifferenced data form
+                         y[t+1] <-  z[t]+y[t]
+# compare with actual future series y.f
+                          err[t-60] <- pow(y[t+1]-y.f[t-60],2)}
+# priors on AR and MA parameters (MA priors for invertibility)
+lambda ~ dnorm(0,0.00001)
+rho ~ dunif(-1,1)
+J ~ dbern(0.5)
+for (j in 1:2) {RM[j] ~ dbeta(1,1)
+rm[j] <- 2*RM[j]-1}
+theta[1] <- rm[1]-rm[2]*rm[1]; theta[2] <- rm[2]}
+
+A: Inits
+list(tau=c(NA,1),RM=c(0.5,0.5),rho=0,pi=0.1,lambda=0,B=50,u.0=0,u.minus1=0,z.0=0,J=1)
+list(tau=c(NA,0.07),RM=c(0.35,0.75),rho=-0.2,pi=0.1,lambda=0,B=50,u.0=0,u.minus1=0,z.0=0,J=1)
+list(tau=c(NA,0.45),RM=c(0.95,0.95),rho=0.3,pi=0.1,lambda=0,B=50,u.0=0,u.minus1=0,z.0=0,J=1)
+
+
+Model B (threshold for intercept)
+ {for (t in 1:60) {
+# take 1st diffs of actual series
+                                  z[t] <- y[t+1]-y[t]
+# tau[1] represents measurement error
+                                   z[t] ~ dnorm(mu[t],tau[1])
+                                   z.new[t]  ~ dnorm(mu[t],tau[1])
+                                   e.lc[t] <- pow(z[t]-z.new[t],2)
+                                   u[t] ~ dnorm(0,tau[2])}
+# one step ahead forecasts
+for (t in 2:60){             z.one[t] ~ dnorm(mu[t-1],tau[1])
+                                    y.one[t+1] <- z.one[t] + y[t]
+                                    D[t] <- pow(y.one[t+1]-y[t+1],2)}
+for (t in 3:60) { mu[t]  <- u[t]-theta[1]*u[t-1] -theta[2]*u[t-2]           + J[t]*lambda + rho*z[t-1] }
+                         mu[2] <- u[2]-theta[1]*u[1] -theta[2]*u.0                + J[2]*lambda + rho*z[1] 
+                         mu[1] <- u[1]-theta[1]*u.0 -theta[2]*u.minus1       + J[1]*lambda + rho*z.0 
+# priors for innovation and measurement error variances
+for (t in 1:60) {    J[t] <- step(t-T)}
+T ~ dunif(5,55)
+tau[2] ~ dgamma(1,0.001) 
+pi ~ dbeta(1,B)
+B ~ dunif(1,1000)
+tau[1] <- tau[2]/pi
+# latent errors and series values
+u.0 ~ dt(0,tau.L,nu); u.minus1 ~ dt(0,tau.L,nu)
+tau.L <- 0.2*tau[2]
+nu <- 2
+z.0 ~ dnorm(0,0.001)
+# total errors of prediction within series
+  E[1] <- sum(D[2:60])
+  E[2] <- sum(e.lc[])
+# forecasting equations
+for (t in 61:67) {z[t] <- lambda + rho*z[t-1]+u[t]-theta[1]*u[t-1]-theta[2]*u[t-2]
+                          u[t] ~ dnorm(0,tau[2])
+# forecasts in undifferenced data form
+                         y[t+1] <-  z[t]+y[t]
+# compare with actual future series y.f
+                          err[t-60] <- pow(y[t+1]-y.f[t-60],2)}
+# priors on AR and MA parameters (MA priors for invertibility)
+lambda ~ dnorm(0,0.00001)
+rho ~ dunif(-1,1)
+for (j in 1:2) {RM[j] ~ dbeta(1,1)rm[j] <- 2*RM[j]-1}
+theta[1] <- rm[1]-rm[2]*rm[1]; theta[2] <- rm[2]}
+
+
+# B: Inits
+list(tau=c(NA,1),RM=c(0.5,0.5),rho=0,pi=0.1,lambda=0,B=50,
+u.0=0,u.minus1=0,z.0=0,T=30)
+
+list(tau=c(NA,0.07),RM=c(0.35,0.75),rho=-0.2,pi=0.1,lambda=20,B=50,
+u.0=0,u.minus1=0,z.0=0,T=42)
+
+list(tau=c(NA,0.45),RM=c(0.95,0.95),rho=0.2,pi=0.1,lambda=60,B=50,
+u.0=0,u.minus1=0,z.0=0,T=50)
+
+Data
+list( y=c(569, 416,422,565,484,520,573,518,501,505,468,382,310,334,359,372,
+439,446,349,395,461,511,583,590,620,578,534,631,600,438,516,534,467,457,392,467,500,
+493,410,412,416,403,422,459,467,512,534,552,545,560.5,602.9,552.2,
+595.3,591.7,603.4,648.4,678.7,691.3,665.2,776.3,823.7,NA,NA,NA,NA,NA,NA,NA),
+# actual data beyond 1980
+ y.f=c(818.4,833.5,777.9,891.8,879,886.1,912.7))
+
+

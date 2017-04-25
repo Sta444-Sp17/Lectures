@@ -1,0 +1,646 @@
+
+---
+title: "Lecture 16" 
+subtitle: "Spatial Data and Cartography"
+author: "Colin Rundel"
+date: "03/20/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE)
+options(width=70)
+
+set.seed(20170308)
+
+library(dplyr)
+library(sf)
+library(stringr)
+library(purrr)
+```
+
+# Background
+
+## Analysis of geospatial data in R {.smaller}
+
+R has a rich package ecosystem for read/writing, manipulating, and analyzing geospatial data.
+
+<br/>
+
+Some core packages:
+
+* `sp` - core classes for handling spatial data, additional utility functions.
+
+* `rgdal` - R interface to `gdal` (Geospatial Data Abstraction Library) for reading and writing spatial data.
+
+* `rgeos` - R interface to `geos` (Geometry Engine Open Source) library for querying and manipulating spatial data. Reading and writing WKT.
+
+* `raster` - classes and tools for handling spatial raster data.
+
+<br/>
+
+See more - [Spatial task view](http://cran.r-project.org/web/views/Spatial.html)
+
+## Analysis of geospatial data in R {.smaller}
+
+R has a rich package ecosystem for read/writing, manipulating, and analyzing geospatial data.
+
+<br/>
+
+Some core packages:
+
+* ~~`sp` - core classes for handling spatial data, additional utility functions.~~
+
+* ~~`rgdal` - R interface to `gdal` (Geospatial Data Abstraction Library) for reading and writing spatial data.~~
+
+* ~~`rgeos` - R interface to `geos` (Geometry Engine Open Source) library for querying and manipulating spatial data. Reading and writing WKT.~~
+
+* `sf` - Combines the functionality of `sp`, `rgdal`, and `rgeos` into a single package based on tidy priciples.
+
+* `raster` - classes and tools for handling spatial raster data.
+
+<br/>
+
+See more - [Spatial task view](http://cran.r-project.org/web/views/Spatial.html)
+
+
+## Installing `sf`
+
+\footnotesize
+
+The `sf` package is currently under active development and is evolving rapidly. The version on CRAN should be reasonably up to date, but the most current version is always available from [github](https://github.com/edzer/sfr/).
+
+Difficulty comes from requirements for external libraries (`geos`, `gdal`, and `proj4`).
+
+* *Windows* - installing from source works when Rtools is installed (system requirements are downloaded from rwinlib)
+
+* *MacOS* - install dependencies via homebrew:
+
+\scriptoutput
+
+```shell
+brew tap osgeo/osgeo4mac && brew tap --repair
+brew install proj 
+brew install geos 
+brew install udunits
+brew unlink gdal
+brew install gdal2 
+```
+
+* *Linux* - Install development pacakages for GDAL (>= 2.0.0), GEOS (>= 3.3.0) and Proj.4 (>= 4.8.0) from your package manager of choice.
+
+
+
+
+## Simple Features {.smaller}
+
+```{r, echo=FALSE}
+par(mar=c(1,1,2,1), mfrow=c(2,4))
+
+
+## Single Geometries
+
+pt = st_point(c(30, 10))
+ls = st_linestring(matrix(c(30, 10, 10, 30, 40, 40), byrow=TRUE, ncol=2))
+poly = st_polygon(list(matrix(c(30, 10, 40, 40, 20, 40, 10, 20, 30, 10), ncol=2, byrow=TRUE)))
+poly_hole = st_polygon(
+              list(
+                matrix(c(35, 10, 45, 45, 15, 40, 10, 20, 35, 10), ncol=2, byrow=TRUE),
+                matrix(c(20, 30, 35, 35, 30, 20, 20, 30), ncol=2, byrow=TRUE)
+              )
+            )
+
+plot(pt, axes=FALSE, main="Point", pch=16); box()
+plot(ls, axes=FALSE, main="Linestring");    box()
+plot(poly, axes=FALSE, col="lightgrey", main="Polygon");  box()
+plot(poly_hole, axes=FALSE, col="lightgrey", main="Polygon w/ Hole(s)");  box()
+
+
+
+
+
+## Multi Geometries
+
+pts = st_multipoint(matrix(c(10, 40, 40, 30, 20, 20, 30, 10), ncol=2, byrow=TRUE))
+lss = st_multilinestring(list( 
+        matrix(c(10, 10, 20, 20, 10, 40), ncol=2, byrow=TRUE),
+        matrix(c(40, 40, 30, 30, 40, 20, 30, 10), ncol=2, byrow=TRUE)
+      ))
+        
+polys = st_multipolygon(list(
+          list(matrix(c(30, 20, 45, 40, 10, 40, 30, 20), ncol=2, byrow=TRUE)),
+          list(matrix(c(15, 5, 40, 10, 10, 20, 5, 10, 15, 5), ncol=2, byrow=TRUE))
+        ))
+polys_hole = st_multipolygon(list(
+                list(matrix(c(40, 40, 20, 45, 45, 30, 40, 40), ncol=2, byrow=TRUE)),
+                list(
+                  matrix(c(20, 35, 10, 30, 10, 10, 30, 5, 45, 20, 20, 35), ncol=2, byrow=TRUE),
+                  matrix(c(30, 20, 20, 15, 20, 25, 30, 20), ncol=2, byrow=TRUE)
+                )
+              ))
+
+plot(pts, axes=FALSE, main="Multipoint", pch=16); box()
+plot(lss, axes=FALSE, main="Multilinestring");    box()
+plot(polys, axes=FALSE, col="lightgrey", main="Multipolygon");  box()
+plot(polys_hole, axes=FALSE, col="lightgrey", main="Multipolygon w/ Hole(s)");  box()
+```
+
+
+## Geometry Collection {.smaller}
+
+```{r, echo=FALSE, fig.align='center'}
+#par(mar=c(1,1,1,1))
+
+cols = c("#7fc97f","#386cb0","#beaed4","#fdc086")
+gc = st_geometrycollection(list(
+  st_point(c(3,3)),
+  st_multipoint(matrix(c(4,8,1,8), ncol=2, byrow=TRUE)),
+  st_multilinestring(list(
+    matrix(c(4,6,7,10), ncol=2, byrow=TRUE),
+    matrix(c(1,1,1,2,2,2), ncol=2, byrow=TRUE)
+  )),
+  st_polygon(list(
+    matrix(c(6,6,8,3,8,8,6,6), ncol=2, byrow=TRUE)
+  ))
+))
+
+plot(gc, col="black", axes=FALSE, pch=16, lwd=2); box()
+```
+
+\begin{center}
+GeometryCollection(Point, Multipoint, Multilinestring, Polygon)
+\end{center}
+
+
+## Reading and writing geospatial data via `sp`
+
+- `maptools`
+    * `readShapePoints` / `writeShapePoints` - Shapefile w/ points
+    * `readShapeLines` / `writeShapeLines` - Shapefile w/ lines
+    * `readShapePoly` / `writeShapePoly` - Shapefile w/ polygons
+    * `readShapeSpatial` / `writeShapeSpatial` - Shapefile
+- `rgdal`
+    * `readOGR` / `writeOGR` - Shapefile, GeoJSON, KML, ...
+- `rgeos`
+    * `readWKT` / `writeWKT` - Well Known Text
+- `sf`
+    * `st_read` / `st_write` - Shapefile, GeoJSON, KML, ...
+
+## Reading and writing geospatial data via `sp`
+
+- ~~`maptools`~~
+    * ~~`readShapePoints` / `writeShapePoints` - Shapefile w/ points~~
+    * ~~`readShapeLines` / `writeShapeLines` - Shapefile w/ lines~~
+    * ~~`readShapePoly` / `writeShapePoly` - Shapefile w/ polygons~~
+    * ~~`readShapeSpatial` / `writeShapeSpatial` - Shapefile~~
+- ~~`rgdal`~~
+    * ~~`readOGR` / `writeOGR` - Shapefile, GeoJSON, KML, ...~~
+- `rgeos`
+    * `readWKT` / `writeWKT` - Well Known Text
+- `sf`
+    * `st_read` / `st_write` - Shapefile, GeoJSON, KML, ...
+
+
+# Geospatial stuff is complicated
+
+## Projections
+
+```{r echo=FALSE}
+lat_lines  = map(seq(9.999, 89.999, length.out = 9), ~ cbind(seq(-179.999, -9.999, length.out=100), .))
+long_lines = map(seq(-179.999, -9.999, length.out = 17), ~ cbind(., seq(9.999, 89.999, length.out=100))) 
+
+lat_long = c(lat_lines, long_lines) %>% 
+  st_multilinestring() %>%
+  st_sfc() %>%
+  st_set_crs("+proj=longlat +datum=WGS84 +no_defs")
+```
+
+
+```{r echo=FALSE, fig.align="center"}
+library(maptools)
+data(wrld_simpl)
+world = st_as_sf(wrld_simpl)
+
+NAm = world %>% filter(FIPS %in% c("CA","GL","MX","US"))
+NAm_google = st_transform(NAm, "+init=epsg:3857")
+
+
+par(mar=c(3,2,2,1),mfrow=c(2,3))
+plot(lat_long, col=adjustcolor("grey",alpha.f = 0.5), axes=TRUE, main="Lat/Long (epsg:4326)")
+plot(st_geometry(NAm), col="black", add=TRUE)
+
+plot(st_transform(lat_long, "+init=epsg:3857"), col=adjustcolor("grey",alpha.f = 0.5), axes=TRUE, main="Google / Web Mercator (epsg:3857)", ylim=c(0, 2e7))
+plot(st_transform(NAm, "+init=epsg:3857") %>% st_geometry(), col="black", add=TRUE)
+
+lcc = "+proj=lcc +lat_1=20 +lat_2=60 +lat_0=40 +lon_0=-96 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs"
+plot(st_transform(lat_long, lcc), col=adjustcolor("grey",alpha.f = 0.5), axes=TRUE, main="Lambert Conformal Conic:")
+plot(st_transform(NAm, lcc) %>% st_geometry(), col="black", add=TRUE)
+
+aea = "+proj=aea +lat_1=20 +lat_2=60 +lat_0=40 +lon_0=-96 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs"
+plot(st_transform(lat_long, aea), col=adjustcolor("grey",alpha.f = 0.5), axes=TRUE, main="Alberts Equal Area")
+plot(st_transform(NAm, aea) %>% st_geometry(), col="black", add=TRUE)
+
+robinson = "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+plot(st_transform(lat_long, robinson), col=adjustcolor("grey",alpha.f = 0.5), axes=TRUE, main="Robinson")
+plot(st_transform(NAm, robinson) %>% st_geometry(), col="black", add=TRUE)
+
+mollweide = "+proj=moll +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+plot(st_transform(lat_long, mollweide), col=adjustcolor("grey",alpha.f = 0.5), axes=TRUE, main="Mollweide")
+plot(st_transform(NAm, mollweide) %>% st_geometry(), col="black", add=TRUE)
+
+```
+
+## Dateline
+
+Want to fly from the Western most point in the US to the Eastern most point?
+
+
+```{r echo=FALSE, fig.align="center", fig.height=5, fig.width=8}
+par(mar=c(3,3,1,1))
+
+ak = st_read("data/ak/states.shp", quiet = TRUE, stringsAsFactors = FALSE)
+ak_geom = st_geometry(ak)
+
+west_hem = st_polygon(list(matrix(c(-180,90, -180,-90, 0,-90, 0,90, -180,90), ncol=2,byrow=TRUE))) %>% 
+  st_sfc() %>%
+  st_set_crs("+proj=longlat +datum=WGS84")
+
+east_hem = st_polygon(list(matrix(c(180,90, 180,-90, 0,-90, 0,90, 180,90), ncol=2,byrow=TRUE))) %>% 
+  st_sfc() %>%
+  st_set_crs("+proj=longlat +datum=WGS84")
+
+ak_west = st_intersection(ak_geom, west_hem)
+ak_east = st_intersection(ak_geom, east_hem)
+
+ak_east_shift = (ak_east - c(360,0)) %>% st_set_crs("+proj=longlat +datum=WGS84")
+
+ak_shift = st_union(ak_east_shift, ak_west)
+
+plot(ak_shift, axes=TRUE, col="black", border=NA, xlim=c(-190, -130))
+points(c(-360+179.776,-179.146), c(51.952,51.273),col='red')
+abline(v=-180,col='blue',lty=2)
+```
+
+##
+
+```{r echo=FALSE}
+plot(ak_shift, axes=TRUE, col="black", border=NA, xlim=c(-190, -170), ylim=c(50, 55))
+points(c(-360+179.776,-179.146), c(51.952,51.273),col='red')
+abline(v=-180,col='blue',lty=2)
+```
+
+
+##
+
+```{r echo=FALSE, fig.align="center", fig.width=8, fig.height=4}
+library(geosphere)
+par(mar=c(0,0,0,0))
+inter = gcIntermediate(c(179.776,51.952), c(-179.146,51.273), n=50, addStartEnd=TRUE)
+
+plot(st_geometry(world), col="black", ylim=c(-90,90), axes=TRUE)
+lines(inter,col='red',lwd=2,lty=3)
+```
+
+## Relationships
+
+\begin{center}
+\includegraphics[width=0.6\textwidth]{figs/Taal.png} \\
+\includegraphics[width=\textwidth]{figs/taal_seq.png}
+\end{center}
+
+
+## Distance on a Sphere
+
+```{r echo=FALSE}
+states = st_read("data/us/states-unfiltered.shp", quiet = TRUE, stringsAsFactors = FALSE) %>%
+  filter(!STATE %in% c("Alaska", "Hawaii", "Puerto Rico", "U.S. Virgin Islands"))
+
+plot(st_geometry(states))
+
+
+durham = c(-78.8986, 35.9940)
+la = c(-118.243, 34.0522)
+locs = rbind(durham, la)
+
+gc = gcIntermediate(durham, la, n=50, addStartEnd=TRUE)
+
+points(locs, col='blue', pch=16, cex=2)
+lines(locs, col='red', lty=2, lwd=2)
+lines(gc, col='red', lty=3, lwd=2)
+```
+
+## Distance for Simple Features
+
+```{r echo=FALSE, fig.align="center"}
+pt = st_multipoint( matrix(c(45,43, 15,70), ncol=2, byrow=TRUE) )
+ls = st_linestring( matrix(c(10,10,10,90), ncol=2, byrow=TRUE) )
+po = st_polygon( list( 
+  matrix(c(30,50, 50,80, 70,50, 50,20, 30,50), ncol=2, byrow=TRUE),
+  matrix(c(40,40, 60,40, 60,60, 40,60, 40,40), ncol=2, byrow=TRUE)
+))
+
+par(mar=c(0,0,0,0))
+plot(0,0, type='n', axes=FALSE, xlab="", ylab="", xlim=c(0,90),ylim=c(0,90))
+box()
+
+plot(pt, add=TRUE, pch=16, col=cols[1], cex=1.5)
+text(48,50,"C",cex=2,col=cols[1])
+text(18,77,"C",cex=2,col=cols[1])
+
+plot(ls, add=TRUE, col=cols[3], lwd=2)
+text(5,50,"B",cex=2,col=cols[3])
+
+plot(po, add=TRUE, col=paste0(cols[4],"CC"),lwd=2,border=cols[4])
+text(35,70,"A",cex=2,col=paste0(cols[4],"CC"))
+```
+
+How do we define the distance between A and B, A and C, or B and C?
+
+
+
+# Using `sf`
+
+## Example data
+
+\scriptoutput
+
+```{r}
+nc  = st_read("data/gis/nc_counties/", quiet=TRUE, stringsAsFactors=FALSE)
+air = st_read("data/gis/airports/", quiet=TRUE, stringsAsFactors=FALSE)
+hwy = st_read("data/gis/us_interstates/", quiet=TRUE, stringsAsFactors=FALSE)
+
+head(nc)
+```
+
+## {.t}
+
+\tinyoutput
+
+```{r}
+head(air)
+```
+
+## {.t}
+
+\tinyoutput
+
+```{r}
+head(hwy)
+```
+
+## `sf` classes {.t}
+
+\scriptoutput
+
+```{r}
+str(nc)
+
+class(nc)
+
+class(nc$geometry)
+
+class(nc$geometry[[1]])
+```
+
+
+## Projections
+
+```{r}
+st_crs(nc)$proj4string
+st_crs(air)$proj4string
+st_crs(hwy)$proj4string
+```
+
+\vspace{-5mm}
+
+```{r echo=FALSE, fig.align="center", fig.height=3.5, fig.width=8}
+par(mar=c(3,3,3,0.1), mfrow=c(1,3))
+plot(st_geometry(nc),  axes=TRUE, main="nc")
+plot(st_geometry(air), axes=TRUE, pch=16, col="blue", main="air")
+plot(st_geometry(hwy), axes=TRUE, col="red", main="hwy")
+```
+
+## UTM Zones
+
+\begin{center}
+\includegraphics[width=0.9\textwidth]{figs/UTM_Zones.png}
+\end{center}
+
+## Lat/Long
+
+```{r}
+nc_ll = nc
+air_ll = air
+hwy_ll = st_transform(hwy, st_crs(nc)$proj4string)
+```
+
+\vspace{-5mm}
+
+```{r echo=FALSE, fig.align="center", fig.height=3.5, fig.width=8}
+par(mar=c(3,3,3,0.1), mfrow=c(1,3))
+plot(st_geometry(nc_ll),  axes=TRUE, main="nc")
+plot(st_geometry(air_ll), axes=TRUE, pch=16, col="blue", main="air")
+plot(st_geometry(hwy_ll), axes=TRUE, col="red", main="hwy")
+```
+
+
+## UTM
+
+```{r}
+nc_utm = st_transform(nc, st_crs(hwy)$proj4string)
+air_utm = st_transform(air, st_crs(hwy)$proj4string)
+hwy_utm = hwy
+```
+
+\vspace{-5mm}
+
+```{r echo=FALSE, fig.align="center", fig.height=3.5, fig.width=8}
+par(mar=c(3,3,3,0.1), mfrow=c(1,3))
+plot(st_geometry(nc_utm),  axes=TRUE, main="nc")
+plot(st_geometry(air_utm), axes=TRUE, pch=16, col="blue", main="air")
+plot(st_geometry(hwy_utm), axes=TRUE, col="red", main="hwy")
+```
+
+## Comparison
+
+```{r echo=FALSE, fig.align="center", fig.height=3}
+par(mar=c(3,3,3,0.1), mfrow=c(1,2))
+
+plot(st_geometry(nc_ll),  axes=TRUE, main="Lat/Long")
+plot(st_geometry(hwy_ll), col="red", add=TRUE)
+plot(st_geometry(air_ll), pch=16, col="blue", add=TRUE)
+
+plot(st_geometry(nc_utm),  axes=TRUE, main="UTM")
+plot(st_geometry(hwy_utm), col="red", add=TRUE)
+plot(st_geometry(air_utm), pch=16, col="blue", add=TRUE)
+```
+
+## Subsetting vs. dplyr
+
+\tinyoutput
+
+```{r}
+sub = nc$COUNTY %in% c("Durham County","Wake County","Orange County")
+nc[sub,]
+```
+
+```{r}
+filter(nc, COUNTY %in% c("Durham County","Wake County","Orange County"))
+```
+
+
+## Distance between NC counties {.t}
+
+```{r error=TRUE}
+counties = c("Durham County","Wake County","Orange County")
+sub = nc$COUNTY %in% counties
+
+st_distance(nc_ll[sub, ])
+st_distance(nc_utm[sub, ])
+```
+
+## Distance between NC counties (centroids) {.t}
+
+```{r error=TRUE}
+nc_ll[sub, ] %>% st_centroid() %>% st_distance()
+
+nc_utm[sub, ] %>% st_centroid() %>% st_distance()
+```
+
+
+## Distance to the closest airport from each county? {.t} 
+
+```{r}
+d = st_distance(air_utm, nc_utm[sub,]) 
+d[1:5,]
+```
+
+```{r}
+nearest_airport = apply(d, 2, which.min) 
+air %>% slice(nearest_airport) %>% .$AIRPT_NAME
+```
+
+
+
+# Geometry Predicates
+
+## DE-9IM {.t}
+
+\begin{center}
+\includegraphics[width=0.95\textwidth]{figs/de_9im.png}
+\end{center}
+
+## Spatial predicates 
+
+\begin{center}
+\includegraphics[width=0.75\textwidth]{figs/predicates.png}
+\end{center}
+
+\footnotesize
+
+
+\hspace*{-4pt}\makebox[\linewidth][c]{
+\begin{tabular}{lll}
+
+st\_within(a,b) & & st\_touches(a,b) \\
+
+$\begin{bmatrix} T & * & F \\ * & * & F \\ * & * & * \end{bmatrix}$ & &
+$\begin{bmatrix} F & T & * \\ * & * & * \\ * & * & * \end{bmatrix} \cup 
+\begin{bmatrix} F & * & * \\ T & * & * \\ * & * & * \end{bmatrix} \cup 
+\begin{bmatrix} F & * & * \\ * & T & * \\ * & * & * \end{bmatrix}$ \\
+
+\\
+
+st\_crosses(a,b) & & st\_overlaps(a,b) ($\text{dim}(a) = \text{dim}(b)$) \\
+
+$\overset{\text{If dim}(a) < \text{dim}(b)}{\begin{bmatrix} T & * & T \\ * & * & * \\ * & * & * \end{bmatrix}} ~~~
+\overset{\text{If dim}(a) > \text{dim}(b)}{\begin{bmatrix} T & * & * \\ * & * & * \\ T & * & * \end{bmatrix}} ~~~
+\overset{\text{If dim}(any) = 1}{\begin{bmatrix} 0 & * & * \\ * & * & * \\ * & * & * \end{bmatrix}}$ & &
+$\overset{\text{If dim} \in \{0,2\}}{\begin{bmatrix} T & * & T \\ * & * & * \\ T & * & * \end{bmatrix}} ~~~
+\overset{\text{If dim} = 1}{\begin{bmatrix} 1 & * & T \\ * & * & * \\ T & * & * \end{bmatrix}}$ \\
+\end{tabular}
+}
+
+
+## Sparse vs Full Results
+
+```{r}
+st_intersects(nc[20:30,], air) %>% str()
+```
+
+```{r}
+st_intersects(nc, air, sparse=FALSE) %>% str()
+```
+
+
+## Which counties have airports? {.t}
+
+```{r}
+nc_air = st_intersects(nc, air)
+has_air = map_lgl(nc_air, ~ length(.) > 0)
+nc %>% slice(which(has_air)) %>% .$COUNTY
+```
+
+```{r}
+air_in_nc = nc_air %>% unlist() %>% unique()
+air %>% slice(air_in_nc) %>% .$AIRPT_NAME
+```
+ 
+## {.t}
+
+```{r fig.align="center"}
+plot(st_geometry(nc))
+plot(st_geometry(nc[has_air,]), add=TRUE, col="lightblue")
+plot(st_geometry(air[air_in_nc,]), add=TRUE, pch=16, col="blue")
+```
+
+## Adjacency matrix of counties {.t}
+
+```{r}
+nc = nc[order(nc$COUNTY),]
+adj = st_touches(nc, sparse=FALSE)
+
+str(adj)
+
+durham = which(nc$COUNTY == "Durham County")
+nc %>% slice(which(adj[durham,])) %>% .$COUNTY
+```
+
+##
+
+```{r fig.align="center"}
+library(corrplot)
+rownames(adj) = str_replace(nc$COUNTY, " County", "")
+colnames(adj) = str_replace(nc$COUNTY, " County", "")
+corrplot(adj[1:20,1:20],method="color",type="full",tl.col="black",cl.pos = "n")
+```
+
+
+## Which counties have the most neighbors?
+
+```{r fig.align='center'}
+most_neighbors = rowSums(adj)==max(rowSums(adj)) 
+plot(st_geometry(nc))
+plot(st_geometry(nc[most_neighbors,]),add=TRUE,col="lightblue")
+nc$COUNTY[most_neighbors]
+```
+
+## Which counties have the least neighbors?
+
+```{r fig.align='center'}
+least_neighbors = rowSums(adj)==min(rowSums(adj)) 
+plot(st_geometry(nc))
+plot(st_geometry(nc[least_neighbors,]),add=TRUE,col="lightblue")
+nc$COUNTY[least_neighbors]
+```

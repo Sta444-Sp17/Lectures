@@ -1,0 +1,1019 @@
+
+---
+title: "Lecture 14" 
+subtitle: "Full Posterior Pred & Covariance Functions"
+author: "Colin Rundel"
+date: "03/06/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE)
+options(width=70)
+
+set.seed(20170306)
+
+library(magrittr)
+library(dplyr)
+library(modelr)
+library(ggplot2)
+library(tidyr)
+library(rjags)
+library(stringr)
+library(gridExtra)
+library(readr)
+library(purrr)
+library(forcats)
+library(forecast)
+library(astsa)
+library(fields)
+
+theme_set(
+  theme_bw()  
+)
+
+get_coda_parameter = function(coda, pattern)
+{
+  w = coda[[1]] %>% colnames() %>% str_detect(pattern)
+  coda[[1]][,w,drop=FALSE]
+}
+
+post_summary = function(m, ci_width=0.95)
+{
+  d = data_frame(
+    post_mean  = apply(m, 2, mean),
+    post_med   = apply(m, 2, median),
+    post_lower = apply(m, 2, quantile, probs=(1-ci_width)/2),
+    post_upper = apply(m, 2, quantile, probs=1 - (1-ci_width)/2)
+  )
+  
+  if (!is.null(colnames(m)))
+    d = d %>% mutate(param = colnames(m)) %>% select(param,post_mean:post_upper)
+  
+  d
+}
+
+strip_attrs = function(obj)
+{
+  attributes(obj) = NULL
+  obj
+}
+
+strip_class = function(obj)
+{
+  attr(obj,"class") = NULL
+  obj
+}
+
+nugget_cov   = function(d, sigma2=1) ifelse(d==0, sigma2, 0)
+exp_cov      = function(d, sigma2=1, l=1) sigma2 * exp(-abs(d)*l)
+sq_exp_cov   = function(d, sigma2=1, l=1) sigma2 * exp(-(abs(d)*l)^2)
+pow_exp_cov  = function(d, sigma2=1, l=1, p=2) sigma2 * exp(-(abs(d)*l)^p)
+rquad_cov    = function(d, sigma2=1, l=1, a=1) sigma2 * (1+d^2*l^2/a)^(-a)
+periodic_cov = function(d, sigma2=1, l=1, p=1) sigma2 * exp(-2*l^2*sin(pi*d/p)^2)
+matern_cov   = function(d, sigma2=1, l=1, nu=1/2) fields::Matern(d, alpha=l, nu=nu, phi=sigma2)
+sphere_cov   = function(d, sigma2=1, l=1) ifelse(d > 1/l, 0, sigma2*(1 - 1.5*d*l + 0.5*(d*l)^3))
+
+linear_cov   = function(x1, x2, sigma2_b=1, sigma2_v=1, c=0)
+{
+  if (!missing(x2))
+  {
+    sigma2_b + sigma2_v * (x1-c) * (x2-c)
+  } else {
+    expand.grid(t_i=x1, t_j=x1) %>%
+    {linear_cov(.[[1]], .[[2]], sigma2_b=sigma2_b, sigma2_v=sigma2_v, c=c)} %>% 
+      matrix(ncol=length(x1))
+  }
+}
+
+
+  
+# From https://github.com/hadley/dplyr/issues/271
+bin = function(df, var, binwidth, origin = NULL) {
+  n = nrow(df)
+
+  var = as.character(substitute(var))
+  x = df[[var]]
+
+  if (is.null(origin)) {
+    origin = min(x)
+  }
+
+  bin = (x - origin) %/% binwidth
+  indices = unname(split(seq_len(n) - 1, bin))
+  
+  mid = origin + (0:(max(bin)+1)) * binwidth + binwidth/2
+  
+  df[["bin_mid"]] = mid[bin+1]
+  
+  attr(df, "indices") = indices
+  attr(df, "drop") = FALSE
+  attr(df, "group_sizes") = sapply(indices, length)
+  attr(df, "biggest_group_size") = max(attr(df, "group_sizes"))
+  attr(df, "labels") = data.frame(bin = seq_along(indices))
+  attr(df, "vars") = list(quote(bin))
+  class(df) = c("grouped_df", "tbl_df", "tbl", "data.frame")
+
+  df
+}
+
+
+
+dist_long = function(d)
+{
+  d = as.matrix(d)
+  d[upper.tri(d, diag = TRUE)] = NA
+  
+  data.frame(
+    expand.grid(i=1:nrow(d), j=1:nrow(d)),
+    c(d)
+  ) %>%
+    setNames(c("i","j","dist")) %>%
+    filter(!is.na(dist))
+}
+
+emp_semivariogram = function(d, y, x, bin=FALSE, binwidth, range_max)
+{
+  y_col = as.character(substitute(y))
+  x_col = as.character(substitute(x))
+  
+  d = d[[x_col]] %>%
+    dist() %>% 
+    dist_long() %>%
+    mutate(y_i = d[[y_col]][i], y_j = d[[y_col]][j])
+  
+  
+  if (bin)
+  {
+    d = d %>% bin(dist, binwidth = binwidth)
+  } else {
+    d = d %>% mutate(bin_mid = dist) %>% rowwise()
+  }
+  
+  d = d %>%
+    summarize(
+      gamma = sum( (y_i - y_j)^2 / (2*n()) ),
+      h = mean(bin_mid),
+      n = n()
+    )
+  
+  if (!missing(range_max))
+    d = d %>% filter(h < range_max)
+  
+  d
+}
+
+
+rmvnorm = function(n, mu=rep(0, nrow(sigma)), sigma, diag_adjust = 1e-6)
+{
+  diag(sigma) = diag(sigma) + diag_adjust
+  mu %*% matrix(1, ncol=n) + t(chol(sigma)) %*% matrix(rnorm(n*nrow(sigma)), ncol=n)
+}
+```
+
+
+# Full Posterior Predictive Distribution
+
+## FRN Data
+
+```{r echo=FALSE}
+load("../Lecture 1/data/frn_example.Rdata")
+
+pm25 = pm25 %>%
+  mutate(Date = lubridate::mdy(Date)) %>%
+  mutate(day  = (Date - lubridate::mdy("1/1/2007") + 1) %>% as.integer()) %>% 
+  select(-POC) %>%
+  setNames(., tolower(names(.)))
+
+ggplot(pm25, aes(x=date, y=pm25)) +
+  geom_line() +
+  geom_point()
+```
+
+## JAGS Model
+
+\scriptoutput
+```{r echo=FALSE}
+gp_exp_model = "model{
+  y ~ dmnorm(mu, inverse(Sigma))
+
+  for (i in 1:N) {
+    mu[i] = beta[1]+ beta[2] * x[i] + beta[3] * x[i]^2
+  }
+  
+  for (i in 1:(N-1)) {
+    for (j in (i+1):N) {
+      Sigma[i,j] = sigma2 * exp(- pow(l*d[i,j],2))
+      Sigma[j,i] = Sigma[i,j]
+    }
+  }
+
+  for (k in 1:N) {
+    Sigma[k,k] = sigma2 + sigma2_w
+  }
+
+  for (i in 1:3) {
+    beta[i] ~ dt(0, 2.5, 1)
+  }
+  sigma2_w ~ dnorm(10, 1/25) T(0,)
+  sigma2   ~ dnorm(10, 1/25) T(0,)
+  l        ~ dt(0, 2.5, 1) T(0,) 
+}"
+cat(gp_exp_model,"\n")
+
+load(file="gp_jags.Rdata")
+```
+
+## Posterior 
+
+```{r echo=FALSE}
+betas = get_coda_parameter(exp_cov_coda, "beta")
+param = get_coda_parameter(exp_cov_coda, "^[^b]")
+
+(post = rbind(
+  post_summary(betas),
+  post_summary(param)
+)) %>% knitr::kable()
+```
+
+## Predicting {.t} 
+\tinyoutput
+```{r}
+l = post %>% filter(param == 'l') %>% select(post_med) %>% unlist()
+sigma2 = post %>% filter(param == 'sigma2') %>% select(post_med) %>% unlist()
+sigma2_w = post %>% filter(param == 'sigma2_w') %>% select(post_med) %>% unlist()
+
+beta0 = post %>% filter(param == 'beta[1]') %>% select(post_med) %>% unlist()
+beta1 = post %>% filter(param == 'beta[2]') %>% select(post_med) %>% unlist()
+beta2 = post %>% filter(param == 'beta[3]') %>% select(post_med) %>% unlist()
+
+reps=1000
+
+x = pm25$day
+y = pm25$pm25
+x_pred = 1:365 + rnorm(365, 0.01)
+
+mu = beta0 + beta1*x + beta2*x^2
+mu_pred = beta0 + beta1*x_pred + beta2*x_pred^2
+
+dist_o = rdist(x)
+dist_p = rdist(x_pred)
+dist_op = rdist(x, x_pred)
+dist_po = t(dist_op)
+  
+cov_o  = sq_exp_cov(dist_o,  sigma2 = sigma2, l = l) + nugget_cov(dist_o, sigma2 = sigma2_w)
+cov_p  = sq_exp_cov(dist_p,  sigma2 = sigma2, l = l) + nugget_cov(dist_p, sigma2 = sigma2_w)
+cov_op = sq_exp_cov(dist_op, sigma2 = sigma2, l = l) + nugget_cov(dist_op, sigma2 = sigma2_w)
+cov_po = sq_exp_cov(dist_po, sigma2 = sigma2, l = l) + nugget_cov(dist_po, sigma2 = sigma2_w)
+
+cond_cov = cov_p - cov_po %*% solve(cov_o) %*% cov_op
+cond_mu  = mu_pred + cov_po %*% solve(cov_o) %*% (y - mu)
+  
+pred = cond_mu %*% matrix(1, ncol=reps) + t(chol(cond_cov)) %*% matrix(rnorm(length(x_pred)*reps), ncol=reps)
+
+pred_df = pred %>% t() %>% post_summary() %>% mutate(day=x_pred)
+```
+
+## Predictions
+
+```{r echo=FALSE}
+ggplot(pm25, aes(x=day, y=pm25)) +
+  geom_line() +
+  geom_point() +
+  geom_ribbon(data=pred_df, aes(ymin=post_lower,ymax=post_upper, x=day, y=post_med), fill="red", alpha=0.1)+
+  geom_line(data=pred_df, aes(y=post_mean), color='red', size=1)
+```
+
+## Full Posterior Predictive Distribution {.t}
+
+Our posterior consists of samples from
+$$ l, \sigma^2, \sigma^2_w, \beta_0, \beta_1, \beta_2 ~|~ \bm{y} $$
+
+and for the purposes of generating the posterior predictions we sampled
+$$ \bm{y}_{pred} ~|~ l^{(m)}, {\sigma^2}^{(m)}, {\sigma^2_w}^{(m)}, {\beta_0}^{(m)}, {\beta_1}^{(m)}, {\beta_2}^{(m)}, \bm{y} $$
+where $l^{(m)}$, etc. are the posterior median of that parameter. 
+
+. . .
+
+\vspace{5mm}
+
+In practice we should instead be sampling 
+
+$$ \bm{y}^{(i)}_{pred} ~|~ l^{(i)}, {\sigma^2}^{(i)}, {\sigma^2_w}^{(i)}, {\beta_0}^{(i)}, {\beta_1}^{(i)}, {\beta_2}^{(i)}, \bm{y} $$
+since this takes into account the additional uncertainty in the model parameters.
+
+## Full Posterior Predictive Distribution
+\tinyoutput
+```{r}
+if (!file.exists("gp_pred.Rdata"))
+{
+  x = pm25$day; y = pm25$pm25
+  
+  n_post_samp = nrow(param)
+  
+  x_pred = 1:365 + rnorm(365, 0.01)
+  y_pred = matrix(NA, nrow=n_post_samp, ncol=length(x_pred))
+  colnames(y_pred) = paste0("Y_pred[", round(x_pred,0), "]")
+  
+  for(i in 1:n_post_samp)
+  {
+    l = param[i,'l']
+    sigma2 = param[i,'sigma2']
+    sigma2_w = param[i,'sigma2_w']
+    beta0 = betas[i,"beta[1]"]
+    beta1 = betas[i,"beta[2]"]
+    beta2 = betas[i,"beta[3]"]
+    
+    mu = beta0 + beta1*x + beta2*x^2
+    mu_pred = beta0 + beta1*x_pred + beta2*x_pred^2
+    
+    dist_o = rdist(x)
+    dist_p = rdist(x_pred)
+    dist_op = rdist(x, x_pred)
+    dist_po = t(dist_op)
+      
+    cov_o  = sq_exp_cov(dist_o,  sigma2 = sigma2, l = l) + nugget_cov(dist_o,  sigma2 = sigma2_w)
+    cov_p  = sq_exp_cov(dist_p,  sigma2 = sigma2, l = l) + nugget_cov(dist_p,  sigma2 = sigma2_w)
+    cov_op = sq_exp_cov(dist_op, sigma2 = sigma2, l = l) + nugget_cov(dist_op, sigma2 = sigma2_w)
+    cov_po = sq_exp_cov(dist_po, sigma2 = sigma2, l = l) + nugget_cov(dist_po, sigma2 = sigma2_w)
+    
+    cond_cov = cov_p - cov_po %*% solve(cov_o) %*% cov_op
+    cond_mu  = mu_pred + cov_po %*% solve(cov_o) %*% (y - mu)
+      
+    y_pred[i,] = cond_mu + t(chol(cond_cov)) %*% matrix(rnorm(length(x_pred)), ncol=1)
+  }
+  
+  y_pred_df = y_pred %>% post_summary() %>% mutate(x_pred = round(x_pred,0))
+  save(x_pred, y_pred, y_pred_df, file="gp_pred.Rdata")
+} else {
+  load("gp_pred.Rdata")
+}
+```
+
+## Full Posterior Predictive Distribution - Plots
+
+```{r echo=FALSE}
+draws = data.frame(x_pred = round(x_pred,0), y_pred[1:6,] %>% t()) %>%
+  gather(iter, y_pred, -x_pred)
+
+ggplot(pm25, aes(x=day, y=pm25)) +
+  geom_point() +
+  geom_line() +
+  geom_line(data=draws, aes(x=x_pred, y=y_pred, col=iter), alpha=0.75) +
+  geom_line(data=y_pred_df, aes(x=x_pred, y=post_mean), color='red', size=1) +
+  facet_wrap(~iter)
+```
+
+
+## Full Posterior Predictive Distribution - Mean + CI
+
+```{r echo=FALSE}
+ggplot(pm25, aes(x=day, y=pm25)) +
+  geom_line() +
+  geom_point() +
+  geom_ribbon(data=y_pred_df, aes(ymin=post_lower,ymax=post_upper, x=x_pred, y=post_mean), fill="red", alpha=0.1)+
+  geom_line(data=y_pred_df, aes(x=x_pred, y=post_mean), color='red', size=1)
+```
+
+
+# More on Covariance Functions
+
+## Nugget Covariance {.t}
+
+$$ Cov(y_{t_i}, y_{t_j}) = Cov(h = |t_i - t_j|) = \sigma^2 \mathbbm{1}_{\{h=0\}} $$
+
+```{r echo=FALSE, fig.height=4}
+n_draw = 2
+h = 0:20
+
+cov = data_frame(h = h) %>%
+  mutate(C = nugget_cov(d=h, sigma2 = 1))
+
+cov_ex = dist(h) %>% 
+  as.matrix() %>% 
+  nugget_cov(sigma2 = 1) %>%
+  rmvnorm(n_draw, sigma=.) %>% 
+  as.data.frame() %>%
+  setNames(paste0("Draw ", 1:n_draw)) %>%
+  mutate(x = h) %>%
+  gather(draw, y, -x)
+  
+
+grid.arrange(
+  ggplot(cov, aes(x=h, y=C)) +
+    geom_point(),
+  ggplot(cov_ex, aes(x=x, y=y, col=draw)) +
+      geom_line(),
+  ncol=2
+)
+```
+
+
+## (- / Power / Square) Exponential Covariance {.t}
+\vspace{-5mm}
+$$ Cov(y_{t_i}, y_{t_j}) = Cov(h = |t_i - t_j|) = \sigma^2\exp\left(-(h\,l)^p\right) $$
+
+```{r echo=FALSE, fig.height=5, fig.align="center"}
+n_draw = 2
+h = seq(0,1, len=100)
+
+l = 12
+
+cov = data_frame(h = h) %>%
+  mutate(
+    "Exp" = exp_cov(d=h, sigma2 = 1, l=l),
+    "Pow Exp\n(p=1.5)" = pow_exp_cov(d=h, sigma2 = 1, l=l, p=1.5),
+    "Sq Exp" = sq_exp_cov(d=h, sigma2 = 1, l=l)
+  ) %>%
+  gather("Cov", "C", -h)
+
+
+cov_exp = dist(h) %>% 
+    as.matrix() %>% 
+    exp_cov(sigma2 = 1, l=l) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x) %>% 
+    mutate(model = "Exp Cov")
+cov_pow_exp = dist(h) %>% 
+    as.matrix() %>% 
+    pow_exp_cov(sigma2 = 1, l=l, p=1.5) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x) %>% 
+    mutate(model = "Pow Exp Cov")
+cov_sq_exp = dist(h) %>% 
+    as.matrix() %>% 
+    sq_exp_cov(sigma2 = 1, l=l) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x) %>% 
+    mutate(model = "Sq Exp Cov")
+
+  
+
+grid.arrange(
+  ggplot(cov, aes(x=h, y=C, color=Cov)) +
+    geom_line() + 
+    labs(title="Covariance - l=12, sigma2=1"),
+  ggplot(cov_exp, aes(x=x, y=y, color=draw)) +
+    geom_line() + 
+    labs(title="Exponential"),
+  ggplot(cov_pow_exp, aes(x=x, y=y, color=draw)) +
+    geom_line() +
+    labs(title="Powered Exponential (p=1.5)"),
+  ggplot(cov_sq_exp, aes(x=x, y=y, color=draw)) +
+    geom_line() +
+    labs(title="Square Exponential"),
+  ncol=2
+)
+```
+
+## Matern Covariance {.t}
+\vspace{-10mm}
+$$ Cov(y_{t_i}, y_{t_j}) = Cov(h = |t_i - t_j|) = \sigma^2 ~ \frac{2^{1-\nu}}{\Gamma(\nu)} ~ \left(\sqrt{2\nu}\, h \cdot l\right)^\nu ~ K_\nu\left(\sqrt{2\nu} \, h \cdot l\right)$$
+
+```{r echo=FALSE, fig.height=5, fig.align="center"}
+n_draw = 2
+h = seq(0, 6, len=200)
+
+l = 2
+
+cov = data_frame(h = seq(0,6, len=1000)) %>%
+  mutate(
+    "v=1/2" = matern_cov(d=h, sigma2 = 1, l=l, nu=1),
+    "v=3/2" = matern_cov(d=h, sigma2 = 1, l=l, nu=2),
+    "v=5/2" = matern_cov(d=h, sigma2 = 1, l=l, nu=3)
+  ) %>%
+  gather("Cov", "C", -h)
+
+
+cov_mat1 = dist(h) %>% 
+    as.matrix() %>% 
+    matern_cov(sigma2 = 1, l=l, nu=1/2) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x)
+cov_mat2 = dist(h) %>% 
+    as.matrix() %>% 
+    matern_cov(sigma2 = 1, l=l, nu=3/2) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x)
+cov_mat3 = dist(h) %>% 
+    as.matrix() %>% 
+    matern_cov(sigma2 = 1, l=l, nu=3/2) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x)
+
+  
+
+grid.arrange(
+  ggplot(cov, aes(x=h, y=C, color=as_factor(Cov))) +
+    geom_line() + 
+    labs(title="Covariance - l=2, sigma2=1"),
+  ggplot(cov_mat1, aes(x=x, y=y, color=draw)) +
+    geom_line() + 
+    labs(title="Matern - v=1/2"),
+  ggplot(cov_mat2, aes(x=x, y=y, color=draw)) +
+    geom_line() +
+    labs(title="Matern - v=3/2"),
+  ggplot(cov_mat3, aes(x=x, y=y, color=draw)) +
+    geom_line() +
+    labs(title="Matern - v=5/2"),
+  ncol=2
+)
+```
+
+
+## Rational Quadratic Covariance {.t}
+\vspace{-5mm}
+$$ Cov(y_{t_i}, y_{t_j}) = Cov(h = |t_i - t_j|) = \sigma^2 \left(1 + \frac{h^2 \, l^2}{\alpha}\right)^{-\alpha}$$
+
+```{r echo=FALSE, fig.height=5, fig.align="center"}
+n_draw = 2
+h = seq(0,1, len=100)
+
+l = 12
+
+cov = data_frame(h = h) %>%
+  mutate(
+    "α=1"  = rquad_cov(d=h, sigma2 = 1, l=l, a=1),
+    "α=3"  = rquad_cov(d=h, sigma2 = 1, l=l, a=3),
+    "α=10" = rquad_cov(d=h, sigma2 = 1, l=l, a=10)
+  ) %>%
+  gather("Cov", "C", -h)
+
+
+cov_rq1 = dist(h) %>% 
+    as.matrix() %>% 
+    rquad_cov(sigma2 = 1, l=l, a=1) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x)
+cov_rq2 = dist(h) %>% 
+    as.matrix() %>% 
+    rquad_cov(sigma2 = 1, l=l, a=3) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x)
+cov_rq3 = dist(h) %>% 
+    as.matrix() %>% 
+    rquad_cov(sigma2 = 1, l=l, a=10) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x)
+
+  
+
+grid.arrange(
+  ggplot(cov, aes(x=h, y=C, color=as_factor(Cov))) +
+    geom_line() + 
+    labs(title="Covariance - l=12, sigma2=1"),
+  ggplot(cov_rq1, aes(x=x, y=y, color=draw)) +
+    geom_line() + 
+    labs(title="Rational Quadratic - alpha=1"),
+  ggplot(cov_rq2, aes(x=x, y=y, color=draw)) +
+    geom_line() +
+    labs(title="Rational Quadratic - alpha=10"),
+  ggplot(cov_rq3, aes(x=x, y=y, color=draw)) +
+    geom_line() +
+    labs(title="Rational Quadratic - alpha=100"),
+  ncol=2
+)
+```
+
+
+## Some properties {.t}
+
+* **Matern Covariance**
+    - A Gaussian process with Matérn covariance has sample functions that are $\lceil \nu -1\rceil$ times differentiable.
+\vspace{1mm}
+    - When $\nu = 1/2 + p$ for $p \in \mathbb{N}^+$ then the Matern has a simplified form (product of an exponential and a polynomial of order $p$).
+\vspace{1mm}
+    - When $\nu = 1/2$ the Matern is equivalent to the exponential covariance.
+\vspace{1mm}    
+    - As $\nu \to \infty$ the Matern converges to the square exponential covariance.
+
+\vspace{2mm}
+
+* **Rational Quadratic Covariance**
+    - is a scale mixture (infinite sum) of squared exponential covariance functions with different characteristic length-scales ($l$).
+\vspace{1mm}
+    - As $\alpha \to \infty$ the rational quadratic converges to the square exponential covariance.
+\vspace{1mm}
+    - Has sample functions that are infinitely differentiable for any value of $\alpha$ 
+
+## Spherical Covariance {.t}
+\vspace{-5mm}
+\small
+$$ Cov(y_{t_i}, y_{t_j}) = Cov(h = |t_i - t_j|) = \begin{cases}
+\sigma^2\left(1 - \frac{3}{2} h \cdot l + \frac{1}{2} (h \cdot l)^3)\right) & \text{if   } 0 < h < 1/l \\
+0 & \text{otherwise}
+\end{cases}$$
+
+```{r echo=FALSE, fig.height=5, fig.align="center"}
+n_draw = 2
+h = seq(0, 1.1, len=100)
+
+l = 1
+
+cov = data_frame(h = h) %>%
+  mutate(
+    "l=1"   = sphere_cov(d=h, sigma2 = 1, l=1),
+    "l=3" = sphere_cov(d=h, sigma2 = 1, l=3),
+    "l=10" = sphere_cov(d=h, sigma2 = 1, l=10)
+  ) %>%
+  gather("Cov", "C", -h)
+
+
+cov_sph1 = dist(h) %>% 
+    as.matrix() %>% 
+    sphere_cov(sigma2 = 1, l=1) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x)
+cov_sph2 = dist(h) %>% 
+    as.matrix() %>% 
+    sphere_cov(sigma2 = 1, l=3) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x)
+cov_sph3 = dist(h) %>% 
+    as.matrix() %>% 
+    sphere_cov(sigma2 = 1, l=10) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x)
+
+  
+
+grid.arrange(
+  ggplot(cov, aes(x=h, y=C, color=as_factor(Cov))) +
+    geom_line() + 
+    labs(title="Covariance - sigma2=1"),
+  ggplot(cov_sph1, aes(x=x, y=y, color=draw)) +
+    geom_line() + 
+    labs(title="Spherical - l=1"),
+  ggplot(cov_sph2, aes(x=x, y=y, color=draw)) +
+    geom_line() +
+    labs(title="Spherical - l=3"),
+  ggplot(cov_sph3, aes(x=x, y=y, color=draw)) +
+    geom_line() +
+    labs(title="Spherical - l=10"),
+  ncol=2
+)
+```
+
+## Periodic Covariance {.t}
+\vspace{-5mm}
+$$ Cov(y_{t_i}, y_{t_j}) = Cov(h = |t_i - t_j|) = \sigma^2 \exp\left(-2\, l^2 \sin^2\left(\pi\frac{h}{p}\right)\right) $$
+
+```{r echo=FALSE, fig.height=5, fig.align="center"}
+n_draw = 2
+h = seq(0, 6, len=200)
+
+l = 2
+
+cov = data_frame(h = seq(0,6, len=1000)) %>%
+  mutate(
+    "p=1" = periodic_cov(d=h, sigma2 = 1, l=l, p=1),
+    "p=2" = periodic_cov(d=h, sigma2 = 1, l=l, p=2),
+    "p=3" = periodic_cov(d=h, sigma2 = 1, l=l, p=3)
+  ) %>%
+  gather("Cov", "C", -h)
+
+
+cov_per1 = dist(h) %>% 
+    as.matrix() %>% 
+    periodic_cov(sigma2 = 1, l=l, p=1) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x)
+cov_per2 = dist(h) %>% 
+    as.matrix() %>% 
+    periodic_cov(sigma2 = 1, l=l, p=2) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x)
+cov_per3 = dist(h) %>% 
+    as.matrix() %>% 
+    periodic_cov(sigma2 = 1, l=l, p=3) %>%
+    rmvnorm(n_draw, sigma=.) %>% 
+    as.data.frame() %>%
+    setNames(paste0("Draw ", 1:n_draw)) %>%
+    mutate(x = h) %>%
+    gather(draw, y, -x)
+
+  
+
+grid.arrange(
+  ggplot(cov, aes(x=h, y=C, color=as_factor(Cov))) +
+    geom_line() + 
+    labs(title="Covariance - l=2, sigma2=1"),
+  ggplot(cov_per1, aes(x=x, y=y, color=draw)) +
+    geom_line() + 
+    labs(title="Periodic - p=1"),
+  ggplot(cov_per2, aes(x=x, y=y, color=draw)) +
+    geom_line() +
+    labs(title="Periodic - p=2"),
+  ggplot(cov_per3, aes(x=x, y=y, color=draw)) +
+    geom_line() +
+    labs(title="Periodic - p=3"),
+  ncol=2
+)
+```
+
+
+## Linear Covariance {.t}
+\vspace{-5mm}
+$$ Cov(y_{t_i}, y_{t_j}) = \sigma^2_b + \sigma^2_v~(t_i-c)(t_j-c) $$
+
+```{r echo=FALSE, fig.height=4.5, fig.align="center"}
+x = seq(0,1, length=21)
+
+n_draw = 3
+cov_lin = linear_cov(x, c=0) %>% 
+  rmvnorm(n_draw, sigma=.) %>% 
+  as.data.frame() %>%
+  setNames(paste0("Draw ", 1:n_draw)) %>%
+  mutate(x = x) %>%
+  gather(draw, y, -x)
+
+ggplot(cov_lin, aes(x=x, y=y, color=draw)) +
+  geom_line()
+```
+
+## Combining Covariances {.t}
+
+If we definite two valid covariance functions, $Cov_a(y_{t_i}, y_{t_j})$ and $Cov_b(y_{t_i}, y_{t_j})$ then the following are also valid covariance functions,
+
+$$
+\begin{aligned}
+Cov_a(y_{t_i}, y_{t_j}) + Cov_b(y_{t_i}, y_{t_j}) \\
+Cov_a(y_{t_i}, y_{t_j}) \times Cov_b(y_{t_i}, y_{t_j})
+\end{aligned}
+$$
+
+
+## Linear $\times$ Linear $\to$ Quadratic {.t}
+\vspace{-5mm}
+$$ Cov_a(y_{t_i}, y_{t_j}) = 1 + 2~(t_i \times t_j) $$
+$$ Cov_b(y_{t_i}, y_{t_j}) = 2 + 1~(t_i \times t_j) $$
+
+```{r echo=FALSE, fig.height=4.5, fig.align="center"}
+x = seq(-2,2, length=100)
+
+n_draw = 3
+cov_a = linear_cov(x, c=0, sigma2_b = 1, sigma2_v = 2)
+cov_b = linear_cov(x, c=0, sigma2_b = 2, sigma2_v = 1)
+
+cov_ll = (cov_a * cov_b) %>% 
+  rmvnorm(n_draw, sigma=.) %>% 
+  as.data.frame() %>%
+  setNames(paste0("Draw ", 1:n_draw)) %>%
+  mutate(x = x) %>%
+  gather(draw, y, -x)
+
+ggplot(cov_ll, aes(x=x, y=y, color=draw)) +
+  geom_line() + 
+  labs(title="Cov_a * Cov_b")
+```
+
+## Linear $\times$ Periodic {.t}
+
+\vspace{-5mm}
+$$ Cov_a(y_{t_i}, y_{t_j}) = 1 + 1~(t_i \times t_j) $$
+$$ Cov_b(y_{t_i}, y_{t_j}) = Cov(h = |t_i - t_j|) = \exp\left(-2\, \sin^2\left(2\pi\,h\right)\right) $$
+
+```{r echo=FALSE, fig.height=4.5, fig.align="center"}
+n_draw=2
+x = seq(0,3, length=100)
+d = dist(x) %>% as.matrix()
+
+cov_a = linear_cov(x, c=0, sigma2_b = 1, sigma2_v = 2)
+cov_b = periodic_cov(d, sigma2 = 1, l = 1, p = 0.5)
+
+cov_lp = (cov_a * cov_b) %>% 
+  rmvnorm(n_draw, sigma=.) %>% 
+  as.data.frame() %>%
+  setNames(paste0("Draw ", 1:n_draw)) %>%
+  mutate(x = x) %>%
+  gather(draw, y, -x)
+
+ggplot(cov_lp, aes(x=x, y=y, color=draw)) +
+  geom_line() + 
+  labs(title="Cov_a * Cov_b")
+```
+
+## Linear + Periodic {.t}
+
+\vspace{-5mm}
+$$ Cov_a(y_{t_i}, y_{t_j}) = 1 + 1~(t_i \times t_j) $$
+$$ Cov_b(h = |t_i - t_j|) = \exp\left(-2\, \sin^2\left(2\pi\,h\right)\right) $$
+
+```{r echo=FALSE, fig.height=4.5, fig.align="center"}
+n_draw=2
+x = seq(0,3, length=100)
+d = dist(x) %>% as.matrix()
+
+cov_a = linear_cov(x, c=0, sigma2_b = 1, sigma2_v = 2)
+cov_b = periodic_cov(d, sigma2 = 1, l = 1, p = 0.5)
+
+cov_lp = (cov_a + cov_b) %>% 
+  rmvnorm(n_draw, sigma=.) %>% 
+  as.data.frame() %>%
+  setNames(paste0("Draw ", 1:n_draw)) %>%
+  mutate(x = x) %>%
+  gather(draw, y, -x)
+
+ggplot(cov_lp, aes(x=x, y=y, color=draw)) +
+  geom_line() + 
+  labs(title="Cov_a + Cov_b")
+```
+
+## Sq Exp $\times$ Periodic $\to$ Locally Periodic {.t}
+
+\vspace{-5mm}
+$$ Cov_a(h = |t_i - t_j|) =\exp(-(1/3)h^2) $$
+$$ Cov_b(h = |t_i - t_j|) = \exp\left(-2\, \sin^2\left(\pi\,h\right)\right) $$
+
+```{r echo=FALSE, fig.height=4.5, fig.align="center"}
+n_draw=2
+x = seq(0,6, length=100)
+d = dist(x) %>% as.matrix()
+
+cov_a = sq_exp_cov(d, sigma2 = 1, l = 1/3)
+cov_b = periodic_cov(d, sigma2 = 1, l = 1, p = 1)
+
+cov_sp = (cov_a * cov_b) %>% 
+  rmvnorm(n_draw, sigma=.) %>% 
+  as.data.frame() %>%
+  setNames(paste0("Draw ", 1:n_draw)) %>%
+  mutate(x = x) %>%
+  gather(draw, y, -x)
+
+ggplot(cov_sp, aes(x=x, y=y, color=draw)) +
+  geom_line() + 
+  labs(title="Cov_a * Cov_b")
+
+```
+
+## Sq Exp (short) + Sq Exp (long) {.t}
+\vspace{-5mm}
+$$ Cov_a(h = |t_i - t_j|) = (1/4) \exp(-4\sqrt{3}h^2) $$
+$$ Cov_b(h = |t_i - t_j|) = \exp(-(\sqrt{3}/2)h^2) $$
+
+```{r echo=FALSE, fig.height=4.5, fig.align="center"}
+n_draw=2
+x = seq(0,10, length=1000)
+d = dist(x) %>% as.matrix()
+
+cov_a = sq_exp_cov(d, sigma2 = 1/4, l = 4*sqrt(3))
+cov_b = sq_exp_cov(d, sigma2 = 1, l = sqrt(3)/4)
+
+cov_ss = (cov_a + cov_b) %>% 
+  rmvnorm(n_draw, sigma=.) %>% 
+  as.data.frame() %>%
+  setNames(paste0("Draw ", 1:n_draw)) %>%
+  mutate(x = x) %>%
+  gather(draw, y, -x)
+
+ggplot(cov_ss, aes(x=x, y=y, color=draw)) +
+  geom_line() + 
+  labs(title="Cov_a + Cov_b")
+```
+
+## Sq Exp (short) + Sq Exp (long) (Seen another way) {.t}
+
+```{r echo=FALSE, fig.height=4.5, fig.align="center"}
+n_draw=2
+x = seq(0,10, length=1000)
+d = dist(x) %>% as.matrix()
+
+cov_a = sq_exp_cov(d, sigma2 = 1/4, l = 4*sqrt(3))
+cov_b = sq_exp_cov(d, sigma2 = 1, l = sqrt(3)/4)
+
+y_a = rmvnorm(n_draw, sigma=cov_a) %>% as.data.frame() %>% setNames(paste0("Draw ", 1:n_draw))
+y_b = rmvnorm(n_draw, sigma=cov_b) %>% as.data.frame() %>% setNames(paste0("Draw ", 1:n_draw))
+y_c = y_a + y_b
+
+rbind(
+  y_a %>% mutate(name="Cov_A (short)", x=x),
+  y_b %>% mutate(name="Cov_B (long)", x=x),
+  y_c %>% mutate(name="Cov_A + Cov_B", x=x)
+) %>%
+  gather(draw, y, starts_with("Draw")) %>%
+  ggplot(aes(x=x, y=y, color=draw)) +
+    geom_line() +
+    facet_wrap(~as_factor(name))
+```
+
+# BDA3 example
+
+## BDA3
+
+\begin{center}
+\includegraphics[width=0.7\textwidth]{figs/bda_cover.png} 
+
+$~$
+
+\vspace{-3mm}
+\url{http://research.cs.aalto.fi/pml/software/gpstuff/demo_births.shtml}
+\end{center}
+
+
+
+## Births (one year)
+
+\begin{columns}
+\begin{column}{0.5\textwidth}
+\begin{center}
+\includegraphics[width=\textwidth]{figs/births_pic1.png}
+\end{center}
+\end{column}
+\begin{column}{0.5\textwidth}
+
+1. Smooth long term trend \\ (\textit{sq exp cov})
+
+\vspace{2mm}
+
+2. Seven day periodic trend with decay (\textit{periodic $\times$ sq exp cov})
+
+\vspace{2mm}
+
+3. Constant mean
+
+\vspace{2mm}
+
+4. Student t observation model
+
+\end{column}
+\end{columns}
+
+
+## Births (multiple years)
+
+\begin{adjustwidth}{-10mm}{-10mm}
+\begin{center}
+\includegraphics[width=\paperwidth]{figs/births_pic2.png}
+\end{center}
+\end{adjustwidth}
+
+\vspace{-3mm}
+
+\footnotesize
+
+1. slowly changing trend (*sq exp cov*)
+
+2. small time scale correlating noise (*sq exp cov*)
+
+3. 7 day periodical component capturing day of week effect (*periodic $\times$ sq exp cov*)
+
+4. 365.25 day periodical component capturing day of year effect (*periodic $\times$ sq exp cov*)
+
+6. component to take into account the special days and interaction with weekends (*linear cov*)
+
+7. independent Gaussian noise (*nugget cov*)
+
+8. constant mean

@@ -1,0 +1,826 @@
+
+---
+title: "Lecture 15" 
+subtitle: "Mauna Loa Example & GPs for GLMs"
+author: "Colin Rundel"
+date: "03/08/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE)
+options(width=70)
+
+set.seed(20170308)
+
+library(magrittr)
+library(dplyr)
+library(modelr)
+library(ggplot2)
+library(tidyr)
+library(rjags)
+library(stringr)
+library(gridExtra)
+library(readr)
+library(purrr)
+library(forcats)
+library(forecast)
+library(astsa)
+library(fields)
+library(readr)
+
+theme_set(
+  theme_bw()  
+)
+
+get_coda_parameter = function(coda, pattern)
+{
+  w = coda[[1]] %>% colnames() %>% str_detect(pattern)
+  coda[[1]][,w,drop=FALSE]
+}
+
+post_summary = function(m, ci_width=0.95)
+{
+  d = data_frame(
+    post_mean  = apply(m, 2, mean),
+    post_med   = apply(m, 2, median),
+    post_lower = apply(m, 2, quantile, probs=(1-ci_width)/2),
+    post_upper = apply(m, 2, quantile, probs=1 - (1-ci_width)/2)
+  )
+  
+  if (!is.null(colnames(m)))
+    d = d %>% mutate(param = colnames(m)) %>% select(param,post_mean:post_upper)
+  
+  d
+}
+
+strip_attrs = function(obj)
+{
+  attributes(obj) = NULL
+  obj
+}
+
+strip_class = function(obj)
+{
+  attr(obj,"class") = NULL
+  obj
+}
+
+nugget_cov   = function(d, sigma2=1) ifelse(d==0, sigma2, 0)
+exp_cov      = function(d, sigma2=1, l=1) sigma2 * exp(-abs(d)*l)
+sq_exp_cov   = function(d, sigma2=1, l=1) sigma2 * exp(-(abs(d)*l)^2)
+pow_exp_cov  = function(d, sigma2=1, l=1, p=2) sigma2 * exp(-(abs(d)*l)^p)
+rquad_cov    = function(d, sigma2=1, l=1, a=1) sigma2 * (1+d^2*l^2/a)^(-a)
+periodic_cov = function(d, sigma2=1, l=1, p=1) sigma2 * exp(-2*l^2*sin(pi*d/p)^2)
+matern_cov   = function(d, sigma2=1, l=1, nu=1/2) fields::Matern(d, alpha=l, nu=nu, phi=sigma2)
+sphere_cov   = function(d, sigma2=1, l=1) ifelse(d > 1/l, 0, sigma2*(1 - 1.5*d*l + 0.5*(d*l)^3))
+
+linear_cov   = function(x1, x2, sigma2_b=1, sigma2_v=1, c=0)
+{
+  if (!missing(x2))
+  {
+    sigma2_b + sigma2_v * (x1-c) * (x2-c)
+  } else {
+    expand.grid(t_i=x1, t_j=x1) %>%
+    {linear_cov(.[[1]], .[[2]], sigma2_b=sigma2_b, sigma2_v=sigma2_v, c=c)} %>% 
+      matrix(ncol=length(x1))
+  }
+}
+
+
+  
+# From https://github.com/hadley/dplyr/issues/271
+bin = function(df, var, binwidth, origin = NULL) {
+  n = nrow(df)
+
+  var = as.character(substitute(var))
+  x = df[[var]]
+
+  if (is.null(origin)) {
+    origin = min(x)
+  }
+
+  bin = (x - origin) %/% binwidth
+  indices = unname(split(seq_len(n) - 1, bin))
+  
+  mid = origin + (0:(max(bin)+1)) * binwidth + binwidth/2
+  
+  df[["bin_mid"]] = mid[bin+1]
+  
+  attr(df, "indices") = indices
+  attr(df, "drop") = FALSE
+  attr(df, "group_sizes") = sapply(indices, length)
+  attr(df, "biggest_group_size") = max(attr(df, "group_sizes"))
+  attr(df, "labels") = data.frame(bin = seq_along(indices))
+  attr(df, "vars") = list(quote(bin))
+  class(df) = c("grouped_df", "tbl_df", "tbl", "data.frame")
+
+  df
+}
+
+
+
+dist_long = function(d)
+{
+  d = as.matrix(d)
+  d[upper.tri(d, diag = TRUE)] = NA
+  
+  data.frame(
+    expand.grid(i=1:nrow(d), j=1:nrow(d)),
+    c(d)
+  ) %>%
+    setNames(c("i","j","dist")) %>%
+    filter(!is.na(dist))
+}
+
+emp_semivariogram = function(d, y, x, bin=FALSE, binwidth, range_max)
+{
+  y_col = as.character(substitute(y))
+  x_col = as.character(substitute(x))
+  
+  d = d[[x_col]] %>%
+    dist() %>% 
+    dist_long() %>%
+    mutate(y_i = d[[y_col]][i], y_j = d[[y_col]][j])
+  
+  
+  if (bin)
+  {
+    d = d %>% bin(dist, binwidth = binwidth)
+  } else {
+    d = d %>% mutate(bin_mid = dist) %>% rowwise()
+  }
+  
+  d = d %>%
+    summarize(
+      gamma = sum( (y_i - y_j)^2 / (2*n()) ),
+      h = mean(bin_mid),
+      n = n()
+    )
+  
+  if (!missing(range_max))
+    d = d %>% filter(h < range_max)
+  
+  d
+}
+
+
+rmvnorm = function(n, mu=rep(0, nrow(sigma)), sigma, diag_adjust = 1e-6)
+{
+  diag(sigma) = diag(sigma) + diag_adjust
+  mu %*% matrix(1, ncol=n) + t(chol(sigma)) %*% matrix(rnorm(n*nrow(sigma)), ncol=n)
+}
+```
+
+
+# Mauna Loa Exampel
+
+## Atmospheric CO$_2$
+
+```{r echo=FALSE, message=FALSE}
+loa = data_frame(
+  y = co2 %>% strip_attrs(),
+  x = time(co2) %>% strip_attrs()
+)
+
+noaa = read_csv("noaa_mauna_loa.csv") %>%
+  transmute(x = year+(month-1)/12, y=average) %>%
+  filter(x > max(loa$x))
+
+rbind(
+  loa %>% mutate(Source="R"),
+  noaa %>% mutate(Source="NOAA")
+) %>%
+ggplot(aes(x=x,y=y, color=Source)) + 
+  geom_line() 
+```
+
+## ARIMA
+
+```{r echo=FALSE}
+tsdisplay(co2, points = FALSE)
+```
+
+
+## ARIMA(0,1,0)$\times$(0,0,0)
+
+```{r echo=FALSE}
+m1 = Arima(co2, order = c(0,1,0), seasonal = c(0,0,0))
+tsdisplay(m1$residuals, points=FALSE)
+m1$aicc
+```
+
+## ARIMA(0,1,0)$\times$(0,1,0)$_{12}$
+
+```{r echo=FALSE}
+m2 = Arima(co2, order = c(0,1,0), seasonal = c(0,1,0))
+tsdisplay(m2$residuals, points=FALSE)
+m2$aicc
+```
+
+## ARIMA(0,1,0)$\times$(0,1,1)$_{12}$
+
+```{r echo=FALSE}
+m3 = Arima(co2, order = c(0,1,0), seasonal = c(0,1,1))
+tsdisplay(m3$residuals, points=FALSE)
+m3$aicc
+```
+
+## ARIMA(0,1,1)$\times$(0,1,1)$_{12}$
+
+```{r echo=FALSE}
+m4 = Arima(co2, order = c(0,1,1), seasonal = c(0,1,1))
+tsdisplay(m4$residuals, points=FALSE)
+m4$aicc
+```
+
+## ARIMA(0,1,3)$\times$(0,1,1)$_{12}$
+
+```{r echo=FALSE}
+m5 = Arima(co2, order = c(0,1,3), seasonal = c(0,1,1))
+tsdisplay(m5$residuals, points=FALSE)
+m5$aicc
+```
+
+## auto.arima
+
+```{r}
+auto.arima(co2)
+```
+
+
+## Forecasting
+
+```{r echo=FALSE}
+m5_fore = forecast(m5,h = nrow(noaa))
+
+plot(m5_fore )
+lines(noaa, col='red', lwd=1.5)
+```
+
+## Forecasting (zoom)
+
+```{r echo=FALSE}
+plot(m5_fore, xlim=c(1998, 2017), ylim=c(360,410) )
+lines(noaa, col='red', lwd=1.5)
+```
+
+## GP Model {.t}
+
+Based on Rasmussen 5.4.3 (we are using slightly different data and parameterization)
+
+$$ y \sim \mathcal{N}(\bm\mu,~ \bm\Sigma_1 + \bm\Sigma_2 + \bm\Sigma_3 + \bm\Sigma_4 + \sigma^2_5 \mathit{I}\,) $$
+
+$$\{\bm\mu\}_i = \bar{y}$$
+
+
+$$
+\begin{aligned}
+\{\bm\Sigma_1\}_{ij} &= \sigma^2_1 \exp\left(-(l_1 \cdot d_{ij})^2\right) \\
+\{\bm\Sigma_2\}_{ij} &= \sigma^2_2 \exp\left(-(l_2 \cdot d_{ij})^2\right)\exp\left(-2 \, (l_3)^2  \sin^2(\pi \, d_{ij} / p)\right) \\
+\{\bm\Sigma_3\}_{ij} &= \sigma^2_3 \left(1+\frac{(l_4 \cdot d_{ij})^2}{\alpha}\right)^{-\alpha} \\
+\{\bm\Sigma_4\}_{ij} &= \sigma^2_4 \exp\left(-(l_5 \cdot d_{ij})^2\right)
+\end{aligned}
+$$
+
+## JAGS Model
+
+\scriptoutput
+```{r echo=FALSE}
+ml_model = "model{
+  y ~ dmnorm(mu, inverse(Sigma))
+
+  for (i in 1:(length(y)-1)) {
+    for (j in (i+1):length(y)) {
+      k1[i,j] <- sigma2[1] * exp(- pow(l[1] * d[i,j],2))
+      k2[i,j] <- sigma2[2] * exp(- pow(l[2] * d[i,j],2) - 2 * pow(l[3] * sin(pi*d[i,j] / per), 2))
+      k3[i,j] <- sigma2[3] * pow(1+pow(l[4] * d[i,j],2)/alpha, -alpha)
+      k4[i,j] <- sigma2[4] * exp(- pow(l[5] * d[i,j],2))
+      
+      Sigma[i,j] <- k1[i,j] + k2[i,j] + k3[i,j] + k4[i,j]
+      Sigma[j,i] <- Sigma[i,j]
+    }
+  }
+
+  for (i in 1:length(y)) {
+    Sigma[i,i] <- sigma2[1] + sigma2[2] + sigma2[3] + sigma2[4] + sigma2[5]
+  }  
+
+  for(i in 1:5){
+    sigma2[i] ~ dt(0, 2.5, 1) T(0,)
+    l[i] ~ dt(0, 2.5, 1) T(0,)
+  }
+  alpha ~ dt(0, 2.5, 1) T(0,)
+}"
+cat(ml_model,"\n")
+```
+
+```{r echo=FALSE}
+if (!file.exists("init_model.Rdata"))
+{
+  m = jags.model(
+    textConnection(gp_model), 
+    data = list(
+      mu = mean(loa$y) * rep(1, nrow(loa)),
+      y = loa$y,
+      #x = loa$x,
+      d = dist(loa$x) %>% as.matrix(),
+      per = 1,
+      pi = pi
+    ),
+    inits = list(
+      sigma2 = c(66, 2.4, 0.66, 0.18, 0.19)^2,
+      l = 1/c(67, 90, 1.3, 1.2, 1.6/12),
+      alpha = 0.78
+    ),
+    n.adapt=1000
+  )
+  save(m, file="init_model.Rdata")
+} else {
+  load("init_model.Rdata")
+}
+
+if (!file.exists("fit_model.Rdata"))
+{
+  gp_coda = coda.samples(
+    m, variable.names=c("sigma2", "l", "alpha"),
+    n.iter=1000
+  )
+  save(gp_coda, file="fit_model.Rdata")
+} else {
+  load("fit_model.Rdata")
+}
+
+sigma2 = get_coda_parameter(gp_coda, "sigma")
+l      = get_coda_parameter(gp_coda, "^l")
+alpha  = get_coda_parameter(gp_coda, "alpha")
+```
+
+
+<!--
+## Model Fit
+
+```{r echo=FALSE}
+#y = loa$y
+#x = loa$x
+#
+#n_post_samp = 1000
+#
+#calc_cov = function(d,i)
+#{
+#  S1 = sigma2[i,1] * exp(- (l[i,1] * d)^2)
+#  S2 = sigma2[i,2] * exp(- (l[i,2] * d)^2 - 2 * (l[i,3] * sin(pi*d))^2)
+#  S3 = sigma2[i,3] * (1+(l[i,4] * d)^2/alpha[i,1])^-alpha[i,1]
+#  S4 = sigma2[i,4] * exp(- (l[i,5] * d)^2)
+#  S5 = ifelse(abs(d)<1e-4, sigma2[i,5] + 1e-6, 0)
+#  S = S1 + S2 + S3 + S4 + S5
+#  
+#  list(S1=S1, S2=S2, S3=S3, S4=S4, S5=S5, S=S)
+#}
+#
+#x_pred = x-1/6
+#y_pred = matrix(NA, nrow=n_post_samp, ncol=length(x_pred))
+#colnames(y_pred) = paste0("Y_pred[", 1:length(x_pred), "]")
+#
+#mu = rep(mean(y), length(x))
+#mu_pred = rep(mean(y), length(x_pred))
+#
+#dist_o = rdist(x)
+#dist_p = rdist(x_pred)
+#dist_op = rdist(x, x_pred)
+#
+#for(i in 1:nrow(sigma2))
+#{
+#  cov_o  = calc_cov(dist_o, i)$S
+#  cov_p  = calc_cov(dist_p, i)$S
+#  cov_op = calc_cov(dist_op, i)$S
+# 
+#  inv = solve(cov_o, cov_op)
+#  cond_cov = cov_p - t(cov_op) %*% inv
+#  diag(cond_cov) = diag(cond_cov) + 1e-5
+#  cond_mu  = mu_pred + t(inv) %*% (y - mu)
+#   
+#  y_pred[i,] = cond_mu + t(chol(cond_cov)) %*% matrix(rnorm(length(x_pred)), ncol=1)
+#}
+#
+#post_summary(y_pred) %>%
+#  mutate(x = x_pred) %>%
+#  ggplot(aes(x=x, y=post_mean)) +
+#    geom_line(alpha=0.5, color='red') +
+#    geom_ribbon(alpha=0.2, aes(ymin=post_lower, ymax=post_upper)) 
+#    #geom_line(data=loa, aes(x=x,y=y), alpha=0.5)
+```
+
+-->
+
+
+## Forecasting
+
+```{r echo=FALSE}
+y = loa$y
+x = loa$x
+
+n_post_samp = 1000
+
+calc_cov = function(d,i)
+{
+  S1 = sigma2[i,1] * exp(- (l[i,1] * d)^2)
+  S2 = sigma2[i,2] * exp(- (l[i,2] * d)^2 - 2 * (l[i,3] * sin(pi*d))^2)
+  S3 = sigma2[i,3] * (1+(l[i,4] * d)^2/alpha[i,1])^-alpha[i,1]
+  S4 = sigma2[i,4] * exp(- (l[i,5] * d)^2)
+  S5 = ifelse(abs(d)<1e-4, sigma2[i,5] + 1e-6, 0)
+  S = S1 + S2 + S3 + S4 + S5
+  
+  list(S1=S1, S2=S2, S3=S3, S4=S4, S5=S5, S=S)
+}
+```
+
+```{r echo=FALSE}
+if (!file.exists("ml_gp_fore.Rdata"))
+{
+  x_pred = noaa$x
+  y_fore = matrix(NA, nrow=n_post_samp, ncol=length(x_pred))
+  colnames(y_fore) = paste0("Y_pred[", 1:length(x_pred), "]")
+  
+  mu = rep(mean(y), length(x))
+  mu_pred = rep(mean(y), length(x_pred))
+  
+  dist_o = rdist(x)
+  dist_p = rdist(x_pred)
+  dist_op = rdist(x, x_pred)
+  
+  for(i in 1:nrow(sigma2))
+  {
+    cov_o  = calc_cov(dist_o, i)$S
+    cov_p  = calc_cov(dist_p, i)$S
+    cov_op = calc_cov(dist_op, i)$S
+    
+    inv = solve(cov_o, cov_op)
+    cond_cov = cov_p - t(cov_op) %*% inv
+    diag(cond_cov) = diag(cond_cov) + 1e-5
+    cond_mu  = mu_pred + t(inv) %*% (y - mu)
+    
+    y_fore[i,] = cond_mu + t(chol(cond_cov)) %*% matrix(rnorm(length(x_pred)), ncol=1)
+  }
+  
+  save(y_fore, file="ml_gp_fore.Rdata")
+} else {
+  load(file="ml_gp_fore.Rdata")
+}
+```
+
+```{r echo=FALSE}
+summ_80 = post_summary(y_fore, ci_width = 0.8) %>% mutate(x = noaa[["x"]])
+summ_95 = post_summary(y_fore, ci_width = 0.95) %>% mutate(x = noaa[["x"]])
+
+ggplot(summ_95, aes(x=x, y=post_mean)) +
+  geom_ribbon(data=summ_95, aes(ymin=post_lower, ymax=post_upper), fill="#D3D2D6") +
+  geom_ribbon(data=summ_80, aes(ymin=post_lower, ymax=post_upper), fill="#A3A5C3") +
+  geom_line(color="#1007FC") +
+  geom_line(data=loa, aes(x=x,y=y), alpha=0.5) +
+  geom_line(data=noaa, aes(x=x,y=y), alpha=0.5, col='red')
+```
+
+## Forecasting (zoom)
+
+```{r echo=FALSE}
+ggplot(summ_95, aes(x=x, y=post_mean)) +
+  geom_ribbon(data=summ_95, aes(ymin=post_lower, ymax=post_upper), fill="#D3D2D6") +
+  geom_ribbon(data=summ_80, aes(ymin=post_lower, ymax=post_upper), fill="#A3A5C3") +
+  geom_line(color="#1007FC", size=0.8) +
+  geom_line(data=loa, aes(x=x,y=y), alpha=0.5, size=0.8) +
+  geom_line(data=noaa, aes(x=x,y=y), alpha=0.5, col='red', size=0.8) +
+  xlim(1998, 2017) + ylim(360,410)
+```
+
+
+## Forecasting RMSE
+
+```{r echo=FALSE}
+noaa_pred_arima = data_frame(
+  y_hat = m5_fore$mean %>% strip_attrs(),
+  x = time(m5_fore$mean) %>% strip_attrs()
+) %>% 
+  mutate(y = noaa[["y"]])
+
+noaa_pred_gp = summ_95 %>%
+  select(y_hat = post_mean, x) %>%
+  mutate(y = noaa[["y"]])
+
+filters = c(2003, 2008, 2013, 2018)
+
+noaa_rmse = function(year, d) 
+{
+  d %>% 
+    filter(x < year) %>% 
+    {(.$y - .$y_hat)^2} %>% 
+    mean() %>% 
+    sqrt() %>% 
+    round(3)
+}
+
+data_frame(
+  "dates"        = c("Jan 1998 - Jan 2003", "Jan 1998 - Jan 2008", "Jan 1998 - Jan 2013", "Jan 1998 - Mar 2017"),
+  "RMSE (arima)" = map_dbl(filters, noaa_rmse, d=noaa_pred_arima),
+  "RMSE (gp)"    = map_dbl(filters, noaa_rmse, d=noaa_pred_gp)
+) %>%
+  knitr::kable()
+```
+
+ 
+## Rewriting the GP likelihood {.t}
+
+From last time, remember that we can view our GP in the following ways,
+
+$$ y \sim \mathcal{N}(\bm\mu,~ \bm\Sigma_1 + \bm\Sigma_2 + \bm\Sigma_3 + \bm\Sigma_4 + \sigma^2_5 \mathit{I}\,) $$
+
+but we can also think of $y$ as being the deterministic sum of 5 independent GPs
+
+$$ y = \mu + w_1(\bm{x}) + w_2(\bm{x}) + w_3(\bm{x}) + w_4(\bm{x}) + w_5(\bm{x}) $$
+where 
+$$
+\begin{aligned}
+w_1(\bm{x}) &\sim \mathcal{N}(0, \bm\Sigma_1) \\
+w_2(\bm{x}) &\sim \mathcal{N}(0, \bm\Sigma_2) \\
+w_3(\bm{x}) &\sim \mathcal{N}(0, \bm\Sigma_3) \\
+w_4(\bm{x}) &\sim \mathcal{N}(0, \bm\Sigma_4) \\
+w_5(\bm{x}) &\sim \mathcal{N}(0, \sigma^2_5 \mathit{I}\,)
+\end{aligned}
+$$
+
+## Decomposition of Covariance Components {.t}
+
+\footnotesize
+$$ \begin{bmatrix} 
+w_1(\bm{x}) \\
+w_1(\bm{x}^\star) \\
+w_2(\bm{x}) \\
+\bm{y}
+\end{bmatrix} 
+\sim \mathcal{N} \left(
+\begin{bmatrix}
+0 \\ 0\\ 0\\ \bm{\mu}
+\end{bmatrix},~
+\begin{bmatrix}
+\Sigma_1 & \Sigma_1^\star & 0 & \Sigma_1 \\
+{\Sigma_1^\star}^t & \Sigma_1^{\star\star} & 0 & \Sigma_1^\star \\
+0 & 0 & \Sigma_2 & \Sigma_2 \\
+\Sigma_1 & \Sigma_1^\star & \Sigma_2 & \sum_{i=1}^5 \Sigma_i
+\end{bmatrix}
+\right)
+$$
+
+\normalsize
+
+
+therefore
+
+$$ w_1(\bm{x}^\star) ~|~ \bm{y},\bm\mu,\bm\theta \sim \mathcal{N}(\mu_{cond},~ \Sigma_{cond}) $$
+
+$$ \mu_{cond} = 0 + \Sigma_1^\star (\Sigma_1 + \Sigma_2 + \Sigma_3 + \Sigma_4 + \Sigma_5)^{-1}(\bm{y}-\bm\mu) $$
+$$ \Sigma_{cond} = \Sigma_1^{\star\star} - \Sigma_1^\star (\Sigma_1 + \Sigma_2 + \Sigma_3 + \Sigma_4 + \Sigma_5)^{-1} {\Sigma_1^\star}^t $$
+
+
+
+## Forecasting Components
+
+```{r echo=FALSE}
+if (!file.exists("ml_gp_fore_comp.Rdata"))
+{
+  x_pred = noaa$x
+  y_comp = lapply(1:4, function(i) matrix(NA, nrow=n_post_samp, ncol=length(x_pred)))
+    
+  mu = rep(mean(y), length(x))
+  mu_pred = rep(0, length(x_pred))
+  
+  dist_o = rdist(x)
+  dist_p = rdist(x_pred)
+  dist_op = rdist(x, x_pred)
+  
+  p = progress_estimated(n_post_samp)
+  for(i in 1:nrow(sigma2))
+  {
+    cov_o  = calc_cov(dist_o, i)$S
+    inv = solve(cov_o)
+    
+    for(j in 1:4)
+    {
+      cov_name = paste0("S",j)
+      cov_p  = calc_cov(dist_p, i)[[cov_name]]
+      cov_op = calc_cov(dist_op, i)[[cov_name]]
+      
+      cond_cov = cov_p - t(cov_op) %*% inv %*% cov_op
+      diag(cond_cov) = diag(cond_cov) + 1e-4
+      cond_mu  = mu_pred + t(cov_op) %*% inv %*% (y - mu)
+    
+      y_comp[[j]][i,] = cond_mu + t(chol(cond_cov)) %*% matrix(rnorm(length(x_pred)), ncol=1)
+    }
+    p$tick()$print()
+  }
+  
+  save(y_comp, file="ml_gp_fore_comp.Rdata")
+} else {
+  load(file="ml_gp_fore_comp.Rdata")
+}
+```
+
+```{r echo=FALSE}
+lapply(
+  1:4, 
+  function(i) 
+    post_summary(y_comp[[i]]) %>% 
+      mutate(cov=paste0("Sigma_",i), x=noaa[["x"]])
+) %>% 
+  bind_rows() %>%
+  ggplot(aes(x=x, y=post_mean, col=cov, fill=cov)) +
+    geom_ribbon(aes(ymin=post_lower, ymax=post_upper, color=NULL), alpha=0.2) +
+    geom_line() +
+    facet_wrap(~cov, scale="free_y")
+```
+
+## Fit Components
+
+```{r echo=FALSE}
+if (!file.exists("ml_gp_fit_comp.Rdata"))
+{
+  x_pred = loa$x
+  y_fit_comp = lapply(1:4, function(i) matrix(NA, nrow=n_post_samp, ncol=length(x_pred)))
+    
+  mu = rep(mean(y), length(x))
+  mu_pred = rep(0, length(x_pred))
+  
+  dist_o = rdist(x)
+  dist_p = rdist(x_pred)
+  dist_op = rdist(x, x_pred)
+  
+  p = progress_estimated(n_post_samp)
+  for(i in 1:nrow(sigma2))
+  {
+    cov_o  = calc_cov(dist_o, i)$S
+    inv = solve(cov_o)
+    
+    for(j in 1:4)
+    {
+      cov_name = paste0("S",j)
+      cov_p  = calc_cov(dist_p, i)[[cov_name]]
+      cov_op = calc_cov(dist_op, i)[[cov_name]]
+      
+      cond_cov = cov_p - t(cov_op) %*% inv %*% cov_op
+      diag(cond_cov) = diag(cond_cov) + 1e-4
+      cond_mu  = mu_pred + t(cov_op) %*% inv %*% (y - mu)
+    
+      y_fit_comp[[j]][i,] = cond_mu + t(chol(cond_cov)) %*% matrix(rnorm(length(x_pred)), ncol=1)
+    }
+    p$tick()$print()
+  }
+  
+  save(y_fit_comp, file="ml_gp_fit_comp.Rdata")
+} else {
+  load(file="ml_gp_fit_comp.Rdata")
+}
+```
+
+```{r echo=FALSE}
+lapply(
+  1:4, 
+  function(i) 
+    post_summary(y_fit_comp[[i]]) %>% 
+      mutate(cov=paste0("Sigma_",i), x=loa[["x"]])
+) %>% 
+  bind_rows() %>%
+  ggplot(aes(x=x, y=post_mean, col=cov, fill=cov)) +
+    geom_ribbon(aes(ymin=post_lower, ymax=post_upper, color=NULL), alpha=0.2) +
+    geom_line() +
+    facet_wrap(~cov, scale="free_y")
+```
+
+
+# GPs and Logistic Regression
+
+## Logistic Regression {.t}
+ 
+A typical logistic regression problem uses the following model,
+
+$$y_i \sim \text{Bern}(p_i)$$
+$$\begin{aligned}
+\text{logit}(p_i) 
+  &= \bm{X}\,\bm{\beta} \\
+  &= \beta_0 + \beta_1 \, x_{i1} + \cdots + \beta_k \, x_{ik}
+\end{aligned}$$
+
+. . .
+
+there is no reason that the linear equation above can't contain thing like random effects or GPs
+
+$$\begin{aligned}
+y_i &\sim \text{Bern}(p_i) \\
+\text{logit}(p_i) 
+  &= \bm{X}\,\bm{\beta} + w(\bm{x}) \\
+\end{aligned}$$
+where
+$$ w(\bm{x}) \sim \mathcal{N}(0,\Sigma)$$
+
+## A toy example
+
+```{r echo=FALSE}
+inv_logit = function(x) exp(x) / (1+exp(x))
+
+x = c( abs(rnorm(30, 0, 0.1)), rnorm(30, 0.5, 0.05), 1-abs(rnorm(30, 0, 0.1)))
+eta = 2*sin(2.1*pi*(x-0.25)) + rnorm(90, sd=0.1)
+y = rbinom(length(eta), size=1, prob = inv_logit(eta))
+
+d = data_frame(
+  x=x, y=y
+)
+
+ggplot(d, aes(x=x, y=y)) +
+  geom_jitter(height = 0.05)
+```
+
+
+## Jags Model
+
+\footnoteoutput
+```{r echo=FALSE}
+logistic_model = "model{
+  for(i in 1:N) {
+    y[i] ~ dbern(p[i])
+    logit(p[i]) <- eta[i]
+  }
+  eta ~ dmnorm(rep(0,N), inverse(Sigma))
+
+  for (i in 1:(length(y)-1)) {
+    for (j in (i+1):length(y)) {
+      Sigma[i,j] <- sigma2 * exp(- pow(l * d[i,j],2))
+      Sigma[j,i] <- Sigma[i,j]
+    }
+  }
+
+  for (i in 1:length(y)) {
+    Sigma[i,i] <- sigma2 + 1e-06
+  }  
+
+  sigma2 ~ dt(0, 2.5, 1) T(0,)
+  l ~ dunif(sqrt(3),100)
+}"
+cat(logistic_model,"\n")
+```
+
+## Model Results
+
+```{r echo=FALSE}
+if (!file.exists("logistic_model.Rdata"))
+{
+  m_log = jags.model(
+    textConnection(logistic_model), 
+    data = list(
+      d = dist(d$x) %>% as.matrix(),
+      y = d$y,
+      x = d$x,
+      N = nrow(d)
+    ),
+    n.adapt=5000
+  )
+
+  update(m_log, n.iter=10000)#, progress.bar="none")
+  
+  log_coda = coda.samples(
+    m_log, variable.names=c("sigma2", "l", "eta"),
+    n.iter=10000, thin=10
+  )
+  save(m_log, logistic_model, log_coda, file="logistic_model.Rdata")
+} else {
+  load("logistic_model.Rdata")
+}
+
+cov_params = get_coda_parameter(log_coda, "sigma|l")
+eta = get_coda_parameter(log_coda, "eta")
+```
+
+```{r echo=FALSE}
+eta_post = eta %>%
+    post_summary() %>%
+    mutate(x = d[["x"]], param="eta")
+
+p_post = eta %>%
+    inv_logit() %>%
+    post_summary() %>%
+    mutate(x = d[["x"]], param="p")
+
+rbind(eta_post, p_post) %>%
+  ggplot(aes(x=x, y=post_mean, color=param, fill=param)) +
+    geom_ribbon(aes(ymin=post_lower, ymax=post_upper), alpha=0.2, color=NA) +
+    geom_line() +
+    facet_wrap(~param, scale="free_y")
+```

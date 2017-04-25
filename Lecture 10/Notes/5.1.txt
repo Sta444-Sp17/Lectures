@@ -1,0 +1,169 @@
+A: AR(1) Model, conditioning on y[1]
+{for (t in 2:N) {  y[t] ~ dnorm(m[t],tau)  I(0,)
+# regression means 
+                          m[t] <- c + rho*y[t-1]
+# replicate data
+                          y.rep[t] ~ dnorm(m[t],tau)  I(0,)
+                           e2.rep[t] <- pow(y.rep[t]-y[t],2)
+# log likelihood and inverse likelihood
+                          LL[t] <- 0.5*log(tau/6.28)-0.5*tau*pow(y[t] - m[t],2)
+# CPO estimated by posterior average of G[]
+                          G[t] <- 1/exp(LL[t])
+# residual
+                          e2[t] <- pow(y[t]-m[t],2)}
+for (t in 3:N) {# one step ahead predictions
+                          y.one[t] ~ dnorm(m[t-1],tau) I(0,)
+                          e2.one[t] <-pow(y[t]-y.one[t],2)}
+for (t in 3:N) {   De2[t] <- pow((y[t]-m[t])-(y[t-1]-m[t-1]),2)}
+# Durbin Watson and Prob of Nonstationarity
+DW <- sum(De2[3:N])/sum(e2[3:N])
+NONSTAT <- step(rho-1)
+# stationary mean of process
+mu <- c/(1-rho)
+# priors
+c ~ dnorm(300,0.00000001)
+rho ~ dnorm(0,1);   
+tau ~ dgamma(1,0.001)
+# tau ~ dgamma(0.001,0.001)
+# Total one step error and PLC
+      E[1] <- sum(e2.one[3:N])/28
+      E[2] <- sum(e2.rep[2:30])}
+A: Inits
+list(tau=1,c=0,rho=0)
+list(tau=0.0004,c=280,rho=0.31)
+list(tau=0.0007,c=450,rho=0.74)
+
+B: AR(1) Model with prior for y[0] 
+{for (t in 1:N) {  y[t] ~ dnorm(m[t],tau) I(0,)
+# replicate data
+                          y.rep[t] ~ dnorm(m[t],tau)  I(0,)
+                           e2.rep[t] <- pow(y.rep[t]-y[t],2)
+# log likelihood and inverse likelihood
+                          LL[t] <- 0.5*log(tau/6.28)-0.5*tau*pow(y[t] - m[t],2)
+                          G[t] <- 1/exp(LL[t])
+                          e[t] <- y[t]-m[t]}
+# Durbin Watson and Prob of Nonstationarity
+DW <- sum(De2[2:N])/sum(e2[2:N])
+NONSTAT <- step(rho-1)
+for (t in 2:N) {   De2[t] <- pow(e[t]-e[t-1],2)
+# one step ahead predictions
+                       y.one[t] ~ dnorm(m[t-1],tau) I(0,)
+                       e2.one[t] <-pow(y[t]-y.one[t],2)
+                       e2[t] <- e[t]*e[t]}
+# stationary mean of process
+mu <- c/(1-rho)
+# regression means 
+m[1] <- c + rho*y.0
+for (t in 2:N) {m[t] <- c + rho*y[t-1]}
+# priors
+c ~ dnorm(300,0.00000001)
+# prior on latent preseries value
+  y.0 ~ dt(300,tau.1,2) I(0,)
+# priors on rho and precisions
+rho ~ dnorm(0,1)
+tau.1 <- tau/kappa
+tau ~ dgamma(1,0.001)
+# alternative priors on variance inflator
+# kappa ~ dgamma(1,1) I(1,)
+kappa ~ dgamma(0.01,0.01) I(1,)
+# One step error and PLC
+      E[1] <- sum(e2.one[3:N])/28
+      E[2] <- sum(e2.rep[2:30])}
+Inits
+list(tau=1,c=0,y.0=0,rho=0,kappa=1)
+list(tau=1,c=300,y.0=460,rho=0.3,kappa=2)
+list(tau=1,c=460,y.0=750,rho=0.7,kappa=5)
+
+
+Model C: Outlier Model
+model {for (t in 1:N) {  y[t] ~ dnorm(m[t],tau[C[t]]) I(0,)
+                         C[t] ~ dcat(P[1:2])
+# replicate data
+                          y.rep[t] ~ dnorm(m[t],tau[C[t]])  I(0,)
+                           e2.rep[t] <- pow(y.rep[t]-y[t],2)
+# log likelihood and inverse likelihood
+                          LL[t] <- 0.5*log(tau[C[t]]/6.28)-0.5*tau[C[t]]*pow(y[t] - m[t],2)
+                          G[t] <- 1/exp(LL[t])
+                          e[t] <- y[t]-m[t]}
+# Durbin Watson and Prob of Nonstationarity
+DW <- sum(De2[2:N])/sum(e2[2:N])
+NONSTAT <- step(rho-1)
+for (t in 2:N) {   De2[t] <- pow(e[t]-e[t-1],2)
+# one step ahead predictions
+                       y.one[t] ~ dnorm(m[t-1],tau[C[t]]) I(0,)
+                       e2.one[t] <-pow(y[t]-y.one[t],2)
+                       e2[t] <- e[t]*e[t]}
+# stationary mean of process
+mu <- c/(1-rho)
+# regression means 
+m[1] <- c + rho*y.0
+for (t in 2:N) {m[t] <- c + rho*y[t-1]}
+# priors
+c ~ dnorm(300,0.00000001)
+y.0 ~ dt(300,tau[C.0],2) I(0,)
+C.0 ~ dcat(P[1:2])
+rho ~ dnorm(0,1)
+# variance inflator for outliers
+for (j in 1:5) {kap.val[j] <- j*5; kap.prob[j] <- 0.2}
+k.kappa ~ dcat(kap.prob[])
+kappa <- kap.val[k.kappa]
+tau[2] <- tau[1]/kappa
+tau[1] ~ dgamma(1,0.001)
+for (j in 1:2) {P[j] <- weight[j]}
+weight[1] <- 0.95; weight[2] <- 0.05
+# One step error and PLC
+      E[1] <- sum(e2.one[3:N])/28
+      E[2] <- sum(e2.rep[2:30])}
+C: Inits
+list(k.kappa=1,tau=c(1,NA),c=0,y.0=0,rho=0, C=c(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1),C.0=1)
+list(k.kappa=2,tau=c(0.0004,NA),c=0,y.0=0,rho=0.21, C=c(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1),C.0=1)
+list(k.kappa=3,tau=c(0.0008,NA),c=0,y.0=0,rho=0.7, C=c(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1),C.0=1)
+
+Model D: Coefficient Selection Model
+model {for (t in 1:N) {  y[t] ~ dnorm(m[t],tau) I(0,)
+# log likelihood and inverse likelihood
+                         LL[t] <- 0.5*log(tau/6.28)-0.5*tau*pow(y[t] - m[t],2)
+# replicate data
+                          y.rep[t] ~ dnorm(m[t],tau)  I(0,)
+                           e2.rep[t] <- pow(y.rep[t]-y[t],2)
+# CPO estimated by posterior average of G[]
+                          G[t] <- 1/exp(LL[t])
+                          e[t] <- y[t]-m[t]}
+# Durbin Watson and Prob of Nonstationarity
+DW <- sum(De2[2:N])/sum(e2[2:N])
+NONSTAT <- step(rho-1)
+for (t in 2:N) {   De2[t] <- pow(e[t]-e[t-1],2)
+# one step ahead predictions
+                          y.one[t] ~ dnorm(m[t-1],tau) I(0,)
+                          e2.one[t] <-pow(y[t]-y.one[t],2)
+                          e2[t] <- e[t]*e[t]}
+# stationary mean of process
+mu <- c/(1-rho)
+# regression means 
+m[1] <- c + g*rho*y.0
+for (t in 2:N) {m[t] <- c + g*rho*y[t-1]}
+# priors
+c ~ dnorm(300,0.00000001)
+# alternative priors on latent preseries value
+y.0 ~ dt(300,tau.1,2) I(0,)
+rho ~ dnorm(0,1)
+tau ~ dgamma(1,0.001); tau.1 <- tau/kappa
+# prior on variance inflator
+kappa ~ dgamma(0.01,0.01) I(1,)
+# selection indicator for rho
+g ~ dbern(0.9)
+# One step error and PLC
+      E[1] <- sum(e2.one[3:N])/28
+      E[2] <- sum(e2.rep[2:30])}
+D: Inits
+list(tau=1,c=0,y.0=0,rho=0,kappa=1,g=1)
+list(tau=1,c=300,y.0=460,rho=0.3,kappa=2,g=1)
+list(tau=1,c=460,y.0=750,rho=0.7,kappa=5,g=1)
+
+
+# Data
+list(N=30,y=c(485,421,389,394,387,       382,384,334,373,328,         358,383,382,314,465,        422,427,342,501,411,
+             365,451,474,482,476,     431,464,428,418,448))
+
+
+

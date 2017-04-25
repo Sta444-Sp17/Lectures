@@ -1,0 +1,275 @@
+
+---
+title: "Lecture 1" 
+subtitle: "Spatio-temporal data & Linear Models"
+author: "Colin Rundel"
+date: "1/18/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_height: 6
+    fig_caption: FALSE
+    latex_engine: xelatex
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+library(sf)
+library(zoo)
+library(quantmod)
+library(sp)
+library(lubridate)
+library(MASS)
+library(dplyr)
+```
+
+# Spatio-temporal data
+
+
+## Time Series Data - Discrete
+    
+```{r echo=FALSE, fig.align='center', message=FALSE}
+x = getSymbols("^GSPC", src = "yahoo", from = as.Date("2017-01-01"))
+suppressWarnings(plot(GSPC, main='S&P 500 Open (^GSPC)', type='b'))
+```
+
+
+## Time Series Data - Continuous
+  
+```{r echo=FALSE}
+load("data/frn_example.Rdata")
+
+pm25 = pm25 %>% 
+  transmute(date = mdy(Date), pm25 = PM25) %>%
+  filter(month(date) %in% 1:2)
+
+par(mar=c(4,5,4,4))
+plot(pm25, type='b', xlab="", main="FRN Measured PM25", ylab=expression(paste("PM25 (", mu, "g/", m^3,")")))
+```
+
+
+## Spatial Data - Areal
+    
+```{r echo=FALSE}
+nc = st_read(system.file("shape/nc.shp", package="sf"), quiet = TRUE)
+nc = select(nc, SID79, geometry)
+plot(nc, axes=TRUE)
+```
+
+## Spatial Data - Point referenced
+    
+```{r echo=FALSE}
+data(meuse)
+coordinates(meuse) = ~x+y
+m.sf = st_as_sf(meuse)
+
+data(meuse.riv)
+meuse.sr = SpatialPolygons(list(Polygons(list(Polygon(meuse.riv)), "x"))) %>% st_as_sf()
+
+
+opar = par(oma=c(4,4,4,4), mfrow=c(1,3), mar=c(1,2,3,2))
+for(i in 2:4)
+{
+    plot(m.sf %>% select_(i,'geometry'), pch=16, axes=TRUE)
+    plot(meuse.sr, add=TRUE, col='lightblue')
+}
+
+mtext('Meuse River', outer=TRUE, line=2, cex=1.5)
+```
+
+## Point Pattern Data - Time
+   
+```{r echo=FALSE}
+old_faithful = geyser %>% 
+  mutate(time = cumsum(waiting)+cumsum(lag(duration,default=0))) %>% 
+  dplyr::select(time, duration) %>% 
+  slice(1:25)
+
+plot(old_faithful, type='b', main="Old Faithful Eruption Duration")
+```
+
+
+## Point Pattern Data - Space
+    
+\begin{center}
+\includegraphics[width=0.6\textwidth]{figs/fires.png}
+\end{center}
+
+
+## Point Pattern Data - Space + Time
+        
+\begin{center}
+\includegraphics[width=\textwidth]{figs/earthquakes.png}
+\end{center}
+
+
+# (Bayesian) Linear Models
+
+## Linear Models
+
+Pretty much everything we a going to see in this course will fall under the umbrella of linear or generalized linear models. 
+
+$$ 
+\begin{aligned}
+Y_i &= \beta_0 + \beta_1 \, x_{i1} + \cdots + \beta_p \, x_{ip} + \epsilon_i  \\
+\epsilon_i &\sim N(0, \sigma^2)
+\end{aligned}
+$$
+which we can also express using matrix notation as 
+
+$$
+\begin{aligned}
+\underset{n \times 1}{\bm{Y}} &= \underset{n \times p}{\bm{X}} \, \underset{p \times 1}{\bm{\beta}} + \underset{n \times 1}{\bm{\epsilon}} \\
+\bm{\epsilon} &\sim N(\underset{n \times 1}{\bm{0}}, \; \sigma^2 \underset{n \times n}{\mathbbm{I}_n})
+\end{aligned}
+$$
+
+
+## Multivariate Normal Distribution
+
+For an $n$-dimension multivate normal distribution with covariance $\bm{\Sigma}$ (positive semidefinite) can be written as
+
+$$
+\underset{n \times 1}{\bm{Y}} \sim N(\underset{n \times 1}{\bm{\mu}}, \; \underset{n \times n}{\bm{\Sigma}}) \text{ where } \{\bm{\Sigma}\}_{ij} = \rho_{ij} \sigma_i \sigma_j
+$$
+
+$$
+\begin{pmatrix}
+Y_1\\ \vdots\\ Y_n
+\end{pmatrix}
+\sim N\left(
+\begin{pmatrix}
+\mu_1\\ \vdots\\ \mu_n
+\end{pmatrix}, \,
+\begin{pmatrix}
+\rho_{11}\sigma_1\sigma_1 & \cdots & \rho_{1n}\sigma_1\sigma_n \\
+\vdots & \ddots & \vdots \\
+\rho_{n1}\sigma_n\sigma_1 & \cdots & \rho_{nn}\sigma_n\sigma_n \\
+\end{pmatrix}
+\right)
+$$
+
+
+## Multivariate Normal Distribution - Density
+
+For the $n$ dimensional multivate normal given on the last slide, its density is given by
+
+$$
+(2\pi)^{-n/2} \; \det(\bm{\Sigma})^{-1/2} \; \exp{\left(-\frac{1}{2} \underset{1 \times n}{(\bm{Y}-\bm{\mu})'} \underset{n \times n}{\bm{\Sigma}^{-1}} \underset{n \times 1}{(\bm{Y}-\bm{\mu})}\right)} 
+$$
+
+and its log density is given by
+
+$$
+-\frac{n}{2} \log 2\pi - \frac{1}{2} \log \det(\bm{\Sigma}) - -\frac{1}{2} \underset{1 \times n}{(\bm{Y}-\bm{\mu})'} \underset{n \times n}{\bm{\Sigma}^{-1}} \underset{n \times 1}{(\bm{Y}-\bm{\mu})}
+$$
+
+
+## A Simple Linear Regression Example
+
+Lets generate some simulated data where the underlying model is known and see how various regression preceedures function.
+
+$$ \beta_0 = 0.7, \quad \beta_1 = 1.5, \quad \beta_2 = -2.2, \quad \beta_3 = 0.1 $$
+$$ n=100, \quad \epsilon_i \sim N(0,1) $$
+
+
+## Generating the data
+
+```{r}
+set.seed(01172017)
+n = 100
+beta = c(0.7,1.5,-2.2,0.1)
+eps = rnorm(n)
+
+X0 = rep(1, n)
+X1 = rt(n,df=5)
+X2 = rt(n,df=5)
+X3 = rt(n,df=5)
+
+X = cbind(X0, X1, X2, X3)
+Y = X %*% beta + eps
+d = data.frame(Y,X[,-1]) 
+```
+
+
+
+## Least squares fit
+
+Let $\hat{\bm{Y}}$ be our estimate for $\bm{Y}$ based on our estimate of $\bm{\beta}$,
+$$ \hat{\bm{Y}} = \hat{\beta}_0 + \hat{\beta}_1 \, \bm{X}_{1} + \hat{\beta}_2 \, \bm{X}_{2} + \hat{\beta}_3 \, \bm{X}_{3} = \bm{X}\, \hat{\bm{\beta}} $$
+
+. . .
+
+The least squares estimate, $\hat{\bm{\beta}}_{ls}$, is given by
+$$ \underset{\bm{\beta}}{\argmin} \sum_{i=1}^n \left( Y_i - \bm{X}_{i\cdot} \bm{\beta} \right)^2 $$
+
+. . .
+
+With a bit of calculus and algebra we can derive
+$$ \hat{\bm{\beta}}_{ls} = (\bm{X}^t \bm{X})^{-1} \bm{X}^t \, \bm{Y} $$
+
+## Maximum Likelihood
+
+
+
+## Frequentist Fit
+
+```{r}
+lm(Y ~ ., data=d)$coefficients
+
+(beta_hat = solve(t(X) %*% X, t(X)) %*% Y)
+```
+
+
+## Bayesian Model 
+
+$$
+Y_1, \, \ldots, \, Y_{100} \,|\, \bm{\beta}, \, \sigma^2 \sim N(\bm{X}_{i\cdot}\bm{\beta},\, \sigma^2)
+$$
+
+$$ \beta_0,\, \beta_1,\, \beta_2,\, \beta_3 \sim N(0, \sigma^2_\beta = 100) $$
+
+$$ \tau^2 = 1/\sigma^2 \sim \text{Gamma}(a=1,\,b=1) $$
+
+## Deriving the posterior
+
+$$ [\beta_0, \beta_1, \beta_2, \beta_3, \sigma^2 \,|\, \bm{Y}\,] = \frac{[\bm{Y} \,|\, \bm{\beta}, \sigma^2]}{[\bm{Y}\,]} [\bm{\beta}, \sigma^2] $$
+$$ \propto [\bm{Y} \,|\, \bm{\beta}, \sigma^2] [\bm{\beta}] [\sigma^2] $$
+
+. . . 
+
+where, 
+
+$$ [\bm{Y} \,|\, \bm{\beta}, \sigma^2] = 
+\left(2\pi \sigma^2\right)^{-n/2} \exp\left( -\frac{\sum_{i=1}^n \left(Y_i-\beta_0-\beta_1 X_{i,1}-\beta_1 X_{i,2} -\beta_3 X_{i,3}  \right)^2}{2\sigma^2} \right) $$
+
+. . .
+
+$$ [\beta_0,\beta_1,\beta_2,\beta_3 \,|\, \sigma^2_\beta] = (2\pi \sigma^2_\beta)^{-4/2} \exp\left( -\frac{\sum_{i=0}^3\beta^2_i}{2\sigma^2_\beta} \right) $$
+
+. . .
+
+$$ [\sigma^2 \,|\, a,\, b] = \frac{b^a}{\Gamma(a)} (\sigma^2)^{-a-1} \exp\left( -\frac{b}{\sigma^2} \right) $$
+
+## Deriving the posterior (cont.)
+
+$$
+\begin{aligned}
+\lbrack \beta_0, \beta_1, \,&\beta_2, \beta_3, \sigma^2 \,|\, \bm{Y} \, \rbrack  \propto \\
+  &\left(2\pi \sigma^2\right)^{-n/2} \exp\left( -\frac{\sum_{i=1}^n \left(Y_i-\beta_0-\beta_1 X_{i,1}-\beta_1 X_{i,2} -\beta_3 X_{i,3}  \right)^2}{2\sigma^2} \right) \\
+  &(2\pi \sigma^2_\beta)^{-4/2} \exp\left( -\frac{\beta^2_0+\beta^2_1+\beta^2_2+\beta^2_3}{2\sigma^2_\beta} \right) \\
+  &\frac{b^a}{\Gamma(a)} (\sigma^2)^{-a-1} \exp\left( -\frac{b}{\sigma^2} \right) 
+\end{aligned}
+$$
+
+## Deriving the Gibbs sampler ($\sigma^2$ step)
+
+<!-- -->
+
+
+## Deriving the Gibbs sampler ($\beta_i$ step)
+
+<!-- -->

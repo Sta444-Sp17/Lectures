@@ -1,0 +1,578 @@
+
+---
+title: "Lecture 18" 
+subtitle: "Models for areal data"
+author: "Colin Rundel"
+date: "03/22/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE)
+options(width=70)
+
+set.seed(20170322)
+
+library(raster)
+library(dplyr)
+library(sf)
+library(stringr)
+library(purrr)
+library(ggplot2)
+library(gridExtra)
+library(tidyr)
+library(forcats)
+
+
+strip_attrs = function(obj)
+{
+  attributes(obj) = NULL
+  obj
+}
+
+strip_class = function(obj)
+{
+  attr(obj,"class") = NULL
+  obj
+}
+```
+
+# areal / lattice data
+
+## Example - NC SIDS
+
+```{r echo=FALSE}
+nc = st_read(system.file("shape/nc.shp", package="sf"), quiet = TRUE) %>% 
+  select(-(AREA:CNTY_ID), -(FIPS:CRESS_ID))
+
+plot(nc[,"SID79"])
+plot(st_centroid(nc), pch=16, add=TRUE, cex=0.5)
+```
+
+## EDA - Moran's I {.t}
+
+If we have observations at $n$ spatial locations $(s_1, \ldots s_n)$
+
+$$ I = \frac{n}{\sum_{i=1}^n \sum_{j=1}^n w_{ij}} \frac{\sum_{i=1}^n \sum_{j=1}^n w_{ij} \big(y(s_i)-\bar{y}\big)\big(y(s_j)-\bar{y}\big)}{\sum_{i=1}^n \big(y(s_i) - \bar{y}\big)} $$ 
+where $\bm{w}$ is a spatial weights matrix.
+
+
+. . .
+
+\vspace{7mm}
+
+Some properties of Moran's I (when there is no spatial autocorrelation):
+
+* $E(I) = -1 / (n-1)$
+
+\vspace{2mm}
+
+* $Var(I) = E(I^2) - E(I)^2 = \text{Something ugly but closed form}$
+
+\vspace{2mm}
+
+* Asymptotically, $\frac{I - E(I)}{\sqrt{Var(I)}} \sim \mathcal{N}(0,1)$
+
+
+
+## NC SIDS & Moran's I
+
+Lets start by using an adjacency matrix for $\bm{w}$ (shared county borders).
+
+
+\scriptoutput
+
+```{r}
+morans_I = function(y, w)
+{
+  n = length(y)
+  y_bar = mean(y)
+  num = sum(w * (y-y_bar) %*% t(y-y_bar))  
+  denom = sum( (y-y_bar)^2 )
+  (n/sum(w)) * (num/denom)
+}
+
+morans_I(y = nc$SID74, w = 1*st_touches(nc, sparse=FALSE))
+
+
+library(ape)
+Moran.I(nc$SID74, weight = 1*st_touches(nc, sparse=FALSE)) %>% str()
+```
+
+
+
+## EDA - Geary's C {.t}
+
+Like Moran's I, if we have observations at $n$ spatial locations $(s_1, \ldots s_n)$
+
+$$ C = \frac{n-1}{2\sum_{i=1}^n \sum_{j=1}^n w_{ij}} \frac{\sum_{i=1}^n \sum_{j=1}^n w_{ij} \big(y(s_i)-y(s_j)\big)^2}{\sum_{i=1}^n \big(y(s_i) - \bar{y}\big)} $$ 
+where $\bm{w}$ is a spatial weights matrix.
+
+
+. . .
+
+\vspace{7mm}
+
+Some properties of Geary's C:
+
+* $0 < C < 2$
+    * If $C \approx 1$ then no spatial autocorrelation
+    * If $C > 1$ then negative spatial autocorrelation
+    * If $C < 1$ then positive spatial autocorrelation
+
+* Geary's C is inversely related to Moran's I
+
+
+## NC SIDS & Geary's C {.t}
+
+Again using an adjacency matrix for $\bm{w}$ (shared county borders).
+
+
+\scriptoutput
+
+```{r}
+gearys_C = function(y, w)
+{
+  n = length(y)
+  y_bar = mean(y)
+  y_i = y %*% t(rep(1,n))
+  y_j = t(y_i)
+  num = sum(w * (y_i-y_j)^2)  
+  denom = sum( (y-y_bar)^2 )
+  ((n-1)/(2*sum(w))) * (num/denom)
+}
+
+gearys_C(y = nc$SID74, w = 1*st_touches(nc, sparse=FALSE))
+```
+
+
+## Spatial Correlogram
+
+\scriptoutput
+
+```{r} 
+d = nc %>% st_centroid() %>% st_distance() %>% strip_class()
+breaks = seq(0, max(d), length.out = 21)
+d_cut = cut(d, breaks)
+
+adj_mats = map(
+  levels(d_cut), 
+  function(l) 
+  {
+    (d_cut == l) %>%
+      matrix(ncol=100) %>%
+      `diag<-`(0)
+  }
+)
+
+d = data_frame(
+  dist   = breaks[-1],
+  morans = map_dbl(adj_mats, morans_I, y = nc$SID74),
+  gearys = map_dbl(adj_mats, gearys_C, y = nc$SID74)
+)
+```
+
+##
+
+```{r echo=FALSE}
+d %>%
+  gather(var, value, -dist) %>%
+  mutate(var = as_factor(var)) %>%
+  ggplot(aes(x=dist, y=value, color=var)) + 
+    geom_line() + 
+    facet_wrap(~var, scales = "free_y")
+```
+
+##
+
+```{r echo=FALSE}
+ggplot(d, aes(x=morans, y=gearys)) +
+  geom_point() + 
+  geom_smooth(method="lm", se=FALSE, fullrange=TRUE)
+```
+
+# Autoregressive Models
+
+## AR Models - Time {.t}
+
+Lets just focus on the simplest case, an $AR(1)$ process
+
+$$ y_t = \delta + \phi \, y_{t-1} + w_t $$
+
+where $w_t \sim \mathcal{N}(0,\sigma^2)$ and $|\phi| < 1$, then
+
+$$
+\begin{aligned}
+E(y_t) &= \frac{\delta}{1-\phi} \\
+Var(y_t) &= \frac{\sigma^2}{1-\phi}
+\end{aligned}
+$$
+
+## AR Models - Time - Joint Distribution {.t}
+
+Previously we saw that an $AR(1)$ model can be represented using a multivariate normal distribution
+
+$$
+\begin{pmatrix}
+y_1 \\ y_2 \\ \vdots \\ y_n
+\end{pmatrix}
+\sim \mathcal{N} \begin{pmatrix}
+\frac{\delta}{1-\phi} \begin{pmatrix}1\\ 1\\ \vdots\\ 1\end{pmatrix},~
+\frac{\sigma^2}{1-\phi}
+\begin{pmatrix}
+1      & \phi   & \cdots & \phi^{n-1} \\
+\phi   & 1      & \cdots & \phi^{n-2} \\
+\vdots & \vdots & \ddots & \vdots     \\
+\phi^{n-1} & \phi^{n-2}  & \cdots & 1 \\
+\end{pmatrix}
+\end{pmatrix}
+$$
+
+. . .
+
+\vspace{4mm}
+
+In writing down the likelihood we also saw that an $AR(1)$ is 1st order Markovian,
+
+$$ \begin{aligned}
+f(y_1, \ldots, y_n) 
+  &= f(y_1) \, f(y_2 | y_1) \,  f(y_3|y_2,y_1) \,\cdots\, f(y_n|y_{n-1},y_{n-2},\ldots,y_1) \\
+  &= f(y_1) \, f(y_2 | y_1) \,  f(y_3|y_2) \,\cdots\, f(y_n|y_{n-1})
+\end{aligned} $$
+
+
+## Competing Definitions for $y_t$
+
+\Large
+
+$$ y_t = \delta + \phi \, y_{t-1} + w_t $$
+
+\vspace{2mm}
+
+\begin{center}vs.\end{center}
+
+\vspace{2mm}
+
+$$ y_t | y_{t-1} \sim \mathcal{N}(\delta + \phi \, y_{t-1},~\sigma^2) $$
+
+. . .
+
+\vspace{3mm}
+
+In the case of time, both of these definitions result in the same multivariate distribution for $\bm{y}$.
+
+
+
+## AR in Space {.t}
+
+\vspace{4mm}
+
+```{r echo=FALSE}
+sq = st_polygon(list(matrix(c(0,0,0,1,1,1,1,0,0,0),ncol=2, byrow=TRUE)))
+
+sqs = map(1:10, ~ sq + .*c(1,0)) %>% st_sfc()
+
+plot(sqs)
+plot(st_centroid(sqs), add=TRUE, pch=16)
+text( (sqs+c(0,-0.25)) %>% st_centroid() %>% st_coordinates(),labels=paste0("s",1:10), adj=c(0.5,0.5))
+```
+
+. . .
+
+Even in the simplest spatial case there is no clear / unique ordering,
+\footnotesize
+$$ \begin{aligned}
+f\big(y(s_1), \ldots, y(s_{10})\big) 
+  &= f\big(y(s_1)\big) \, f\big(y(s_2) | y(s_1)\big) \, \cdots \, f\big(y(s_{10} | y(s_{9}),y(s_{8}),\ldots,y(s_1)\big)  \\
+  &= f\big(y(s_{10})\big) \, f\big(y(s_9) | y(s_{10})\big) \, \cdots \, f\big(y(s_{1} | y(s_{2}),y(s_{3}),\ldots,y(s_{10})\big)  \\
+  &= ~?
+\end{aligned} $$
+\normalsize
+
+. . .
+
+Instead we need to think about things in terms of their neighbors / neighborhoods. We will define $N(s_i)$ to be the set of neighbors of location $s_i$.
+
+* If we define the neighborhood based on "touching" then $N(s_3) = \{s_2, s_4\}$
+
+* If we use distance within 2 units then $N(s_3) = \{s_1,s_2,s_3,s_4\}$
+
+* etc.
+
+## Defining the Spatial AR model {.t}
+
+Here we will consider a simple average of neighboring observations, just like with the temporal AR model we have two options in terms of defining the autoregressive process, 
+
+* Simultaneous Autogressve (SAR)
+
+$$ y(s) = \delta + \phi \frac{1}{|N(s)|}\sum_{s' \in N(s)} y(s') + \mathcal{N}(0,\sigma^2) $$
+
+* Conditional Autoregressive (CAR)
+
+$$ y(s)|\bm{y}_{-s} \sim \mathcal{N}\left(\delta + \phi \frac{1}{|N(s)|}\sum_{s' \in N(s)} y(s'),~ \sigma^2 \right) $$
+
+
+## Simultaneous Autogressve (SAR) {.t}
+
+\vspace{-3mm}
+
+Using
+$$ y(s) = \delta + \phi \frac{1}{|N(s)|}\sum_{s' \in N(s)} y(s') + \mathcal{N}(0,\sigma^2) $$
+we want to find the distribution of $\bm{y} = \Big(y(s_1),\, y(s_2),\,\ldots,\,y(s_n)\Big)^t$.
+
+. . .
+
+\vspace{5mm}
+
+First we need to define a weight matrix $\bm W$ where
+$$ 
+\{\bm W\}_{ij} = \begin{cases}
+1/|N(s_i)| & \text{if $j \in N(s_i)$} \\
+0        & \text{otherwise}
+\end{cases}
+$$
+
+. . .
+
+then we can write $\bm y$ as follows,
+$$ \bm{y} = \bm{\delta} + \phi \, \bm{W} \, \bm{y} + \bm{\epsilon} $$
+where
+$$ \bm\epsilon \sim \mathcal{N}(0,\sigma^2 \, \bm{I}) $$
+
+## A toy example {.t}
+
+\begin{tabular}{c}
+\includegraphics[width=0.3\textwidth]{figs/triangle_adj.png} \\
+~\\
+~\\
+$\bm{W} = \begin{bmatrix}
+0   & 1/2 & 1/2 \\
+1/2 & 0   & 1/2 \\
+1/2 & 1/2 & 0   \\
+\end{bmatrix}$
+\end{tabular}
+
+
+## Back to SAR {.t}
+
+$$ \bm{y} = \bm{\delta} + \phi \, \bm{W} \, \bm{y} + \bm{\epsilon} $$
+
+<!--
+$$ \begin{aligned} 
+\bm{y} &= \bm{\delta} + \phi \, \bm{W} \, \bm{y} + \bm{\epsilon} \\
+\bm{y} - \phi \, \bm{W} \, \bm{y} &= \bm{\delta} + \bm{\epsilon} \\
+(I-\phi \, \bm{W}) \, \bm{y} &= \bm{\delta} + \bm{\epsilon} \\
+\bm{y} &= (I-\phi \, \bm{W})^{-1} \bm{\delta} + (I-\phi \, \bm{W})^{-1} \bm{\epsilon} \\
+\end{aligned}$$
+
+$$\begin{aligned}
+E(\bm{y}) &= (I-\phi \, \bm{W})^{-1} \bm{\delta} \\
+Var(\bm{y}) 
+  &= \left((I-\phi \, \bm{W})^{-1}\right) \sigma^2 I \left((I-\phi \, \bm{W})^{-1}\right)^{t} \\
+  &= \sigma^2 \left((I-\phi \, \bm{W})^{-1}\right) \left((I-\phi \, \bm{W})^{-1}\right)^{t} \\
+\end{aligned}$$
+
+$$ \bm{y} \sim \mathcal{N}((I-\phi \, \bm{W})^{-1} \bm{\delta},~\sigma^2 \left((I-\phi \, \bm{W})^{-1}\right) \left((I-\phi \, \bm{W})^{-1}\right)^{t})$$
+-->
+
+
+## Conditional Autogressve (CAR) {.t}
+
+This is a bit trickier, in the case of the temporal AR process we actually went from joint distribution $\to$ conditional distributions (which we were then able to simplify).
+
+\vspace{3mm}
+
+Since we don't have a natural ordering we can't get away with this (at least not easily).
+
+\vspace{3mm}
+
+Going the other way, conditional distributions $\to$ joint distribution is difficult because it is possible to specify conditional distributions that lead to an improper joint distribution.
+
+
+## Brook's Lemma {.t}
+
+For sets of observations $\bm{x}$ and $\bm{y}$ where $p(x) > 0~~\forall ~ x\in\bm{x}$ and $p(y) > 0~~\forall ~ y\in\bm{y}$ then
+
+$$\begin{aligned}
+\frac{p(\bm{y})}{p(\bm{x})} 
+  &= \prod_{i=1}^n \frac{p(y_i ~|~ y_1,\ldots,y_{i-1},x_{i+1},\ldots,x_n)}{p(x_i ~|~ x_1,\ldots,x_{i-1},y_{i+1},\ldots,y_n)} \\
+  &= \prod_{i=1}^n \frac{p(y_i ~|~ x_1,\ldots,x_{i-1},y_{i+1},\ldots,y_n)}{p(x_i ~|~ y_1,\ldots,y_{i-1},x_{i+1},\ldots,x_n)} \\
+\end{aligned}$$
+
+
+## A simplified example
+
+Let $\bm{y} = (y_1,y_2)$ and $\bm{x} = (x_1,x_2)$ then we can derive Brook's Lemma for this case,
+
+$$ \begin{aligned}
+p (y_1,y_2) 
+  &= p(y_1 | y_2) p(y_2) \\
+  &= p(y_1 | y_2) \frac{p(y_2|x_1) \, p(x_1)}{p(x_1|y_2)} = \frac{p(y_1 | y_2)}{p(x_1 | y_2)} p(y_2|x_1) \, p(x_1) \\
+  & = \frac{p(y_1 | y_2)}{p(x_1 | y_2)} p(y_2|x_1) \, p(x_1) \left(\frac{p(x_2|x_1)}{p(x_2|x_1)}\right) \\
+  & = \frac{p(y_1 | y_2)}{p(x_1 | y_2)} \frac{p(y_2|x_1)}{p(x_2|x_1)} \, p(x_1,x_2) \\
+\\
+\frac{p (y_1,y_2) }{p(x_1,x_2)} 
+  & = \frac{p(y_1 | y_2)}{p(x_1 | y_2)} \frac{p(y_2|x_1)}{p(x_2|x_1)}
+\end{aligned} $$
+
+<!--
+$$ \begin{aligned}
+\frac{p(y_1,y_2,y_3)}{p(x_1,x_2,x_3)}
+  = \frac{p(y_1|y_2,y_3)}{P(x_1|y_2,y_3)} \frac{p(y_2|x_1,y_3)}{p(x_2|x_1,y_3} \frac{p(y_3|x_1,x_2)}{p(x_3|x_1,x_2)}
+\end{aligned} $$
+-->
+
+
+## Utility? {.t}
+
+Lets repeat that last example but consider the case where $\bm{y} = (y_1,y_2)$ but now we let $\bm{x} = (y_1=0,y_2=0)$
+
+$$ \begin{aligned}
+\frac{p (y_1,y_2) }{p(x_1,x_2)} 
+  &= \frac{p (y_1,y_2) }{p(y_1=0,y_2=0)}  \\
+\\
+p(y_1,y_2) &= \frac{p(y_1 | y_2)}{p(y_1=0 | y_2)} \frac{p(y_2|y_1=0)}{p(y_2=0|y_1=0)} ~ p(y_1=0,y_2=0) \\
+\\
+p(y_1,y_2) 
+  &\propto \frac{p(y_1 | y_2) ~ p(y_2|y_1=0) }{ p(y_1=0 | y_2)} \\
+  &\propto \frac{p(y_2 | y_1) ~ p(y_1|y_2=0) }{ p(y_2=0 | y_1)}
+\end{aligned} $$
+
+
+## As applied to a **simple** CAR {.t}
+
+```{r echo=FALSE, fig.width=6, fig.height=3, out.width="0.2\\textwidth", fig.align="center"}
+sq = st_polygon(list(matrix(c(0,0,0,1,1,1,1,0,0,0),ncol=2, byrow=TRUE)))
+
+sqs = map(1:2, ~ sq + .*c(1,0)) %>% st_sfc()
+
+plot(sqs)
+plot(st_centroid(sqs), add=TRUE, pch=16)
+text( (sqs+c(0,-0.25)) %>% st_centroid() %>% st_coordinates(),labels=paste0("s",seq_along(sqs)), adj=c(0.5,0.5))
+```
+
+\scriptsize
+$$ \begin{aligned}
+y(s_1) | y(s_2) \sim \mathcal{N}(\phi W_{12}\, y(s_2), \sigma^2) \\
+y(s_2) | y(s_1) \sim \mathcal{N}(\phi W_{21}\, y(s_1), \sigma^2)
+\end{aligned}$$
+
+. . .
+
+$$\begin{aligned}
+p\big(y(s_1),y(s_2)\big) 
+  &\propto \frac{p\big(y(s_1) | y(s_2)\big) ~ p\big(y(s_2)|y(s_1)=0\big)}{p\big(y(s_1)=0|y(s_2)\big)}\\
+  &\propto 
+    \frac{
+      \exp\left(-\frac{1}{2\sigma^2}\left(y(s_1)-\phi \, W_{12} \, y(s_2)\right)^2\right)
+      \exp\left(-\frac{1}{2\sigma^2}\left(y(s_2)-\phi \, W_{21} \, 0\right)^2\right) 
+    }{
+      \exp\left(-\frac{1}{2\sigma^2}\left(0-\phi W_{12} y(s_2)\right)^2 \right)
+    }\\
+  &\propto \exp\left(-\frac{1}{2\sigma^2}\left(\left(y(s_1)-\phi \, W_{12} \, y(s_2)\right)^2 + y(s_2)^2- (\phi W_{12} y(s_2))^2\right)\right) \\
+  &\propto \exp\left(-\frac{1}{2\sigma^2}\left(y(s_1)^2-2\phi \, W_{12} \, y(s_1)\,y(s_2) + y(s_2)^2\right)\right) \\
+  &\propto \exp\left(-\frac{1}{2\sigma^2} (\bm{y}-0)
+    \begin{pmatrix} 
+    1 & -\phi W_{12} \\
+    -\phi W_{12} & 1
+    \end{pmatrix}
+    (\bm{y}-0)^{t}
+  \right)
+\end{aligned}$$
+
+## Implicatiomns for $\bm{y}$
+
+\vspace{-3mm}
+
+$$ \bm{\mu} = 0 $$
+
+$$
+\begin{aligned}
+\bm{\Sigma}^{-1} &= \frac{1}{\sigma^2}
+  \begin{pmatrix} 
+    1 & -\phi W_{12} \\
+    -\phi W_{12} & 1
+  \end{pmatrix} \\
+  &= \frac{1}{\sigma^2}(\bm{I} - \phi \, \bm{W})
+\end{aligned}
+$$
+
+$$
+\Sigma = \sigma^2(\bm{I} - \phi \, \bm{W})^{-1}
+$$
+
+. . .
+
+we can then conclude that for $\bm{y} = (y(s_1),~y(s_2))^t$,
+
+$$
+\bm{y} \sim \mathcal{N}\left(
+\bm{0}, ~
+\sigma^2 (\bm{I} - \phi \, \bm{W})^{-1}
+\right)
+$$
+
+which generalizes for all mean 0 CAR models.
+
+
+## General Proof
+
+Let $\bm{y} = (y(s_1),\ldots,y(s_n))$ and $\bm{0} = (y(s_1) = 0, \ldots, y(s_n)=0)$ then by Brook's lemma,
+
+\scriptsize
+
+$$\begin{aligned}
+\frac{p(\bm{y})}{p(\bm{0})} 
+  &= \prod_{i=1}^n \frac{p(y_i|y_1,\ldots,y_{i-1},0_{i+1},\ldots,0_{n})}{p(0_i|y_1,\ldots,y_{i-1},0_{i+1},\ldots,0_{n})} \\
+  &= \prod_{i=1}^n 
+    \frac{
+      \exp\left(-\frac{1}{2\sigma^2} \left(y_i - \phi \sum_{j<i} W_{ij} \, y_j - \phi \sum_{j>i} 0_j \right)^2 \right)
+    }{
+      \exp\left(-\frac{1}{2\sigma^2} \left(0_i - \phi \sum_{j<i} W_{ij} \, y_j - \phi \sum_{j>i} 0_j \right)^2 \right)
+    } \\
+  &= \exp\left(-\frac{1}{2\sigma^2} \sum_{i=1}^n \left(y_i - \phi \sum_{j<i} W_{ij} \, y_j\right)^2 + \frac{1}{2\sigma^2} \sum_{i=1}^n \left( \phi \sum_{j<i} W_{ij} \, y_j \right)^2 \right) \\
+  &= \exp\left(-\frac{1}{2\sigma^2} \sum_{i=1}^n y_i^2 - 2 \phi y_i \,\sum_{j<i} W_{ij} \, y_j \right) \\
+  &= \exp\left(-\frac{1}{2\sigma^2} \sum_{i=1}^n y_i^2 - \phi \sum_{i=1}^n \sum_{j=1}^n y_i \, W_{ij} \, y_j \right) \quad \mathit{\big(\text{if } W_{ij} = W_{ji}\big)} \\
+  &= \exp\left(-\frac{1}{2\sigma^2} \bm{y}^t (\bm{I} - \phi \bm{W}) \bm{y}  \right)
+\end{aligned}$$
+
+## CAR vs SAR
+
+* Simultaneous Autogressve (SAR)
+
+$$ y(s) = \phi \sum_{s'} \frac{W_{s\,s'}}{W_{s\,\boldsymbol{\cdot}}} y(s') + \epsilon $$
+
+$$ \bm{y} \sim \mathcal{N}(0,~\sigma^2 \, ((\bm{I}-\phi \bm{W})^{-1}) ((\bm{I}-\phi \bm{W})^{-1})^t )$$
+
+* Conditional Autoregressive (CAR)
+
+$$ y(s)|\bm{y}_{-s} \sim \mathcal{N}\left(\sum_{s'} \frac{W_{s\,s'}}{W_{s\,\boldsymbol{\cdot}}} y(s'),~ \sigma^2 \right) $$
+
+$$ \bm{y} \sim \mathcal{N}(0,~\sigma^2 \, (\bm{I}-\phi \bm{W})^{-1})$$
+
+## Generalization 
+
+* Adopting different weight matrices, $\bm{W}$
+  
+    * Between SAR and CAR model we move to a generic weight matrix definition (beyond average of nearest neighbors)
+    
+    * In time we varied $p$ in the $AR(p)$ model, in space we adjust the weight matrix.
+    
+    * In general having a symmetric W is helpful, but not required
+    
+* More complex Variance (beyond $\sigma^2 \, I$)
+  
+    * $\sigma^2$ can be a vector (differences between areal locations)
+    
+    * E.g. since areal data tends to be aggregated - adjust variance based on sample size

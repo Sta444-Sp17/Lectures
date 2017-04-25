@@ -1,0 +1,42 @@
+\frametitle{Predictions}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{nc}\OperatorTok{$}\NormalTok{jags_pred =}\StringTok{ }\NormalTok{y_pred}\OperatorTok{$}\NormalTok{post_mean}
+\NormalTok{nc}\OperatorTok{$}\NormalTok{jags_resid =}\StringTok{ }\NormalTok{nc}\OperatorTok{$}\NormalTok{SID74 }\OperatorTok{-}\StringTok{ }\NormalTok{y_pred}\OperatorTok{$}\NormalTok{post_mean}
+
+\KeywordTok{ggplot}\NormalTok{() }\OperatorTok{+}\StringTok{ }\KeywordTok{geom_sf}\NormalTok{(}\DataTypeTok{data=}\NormalTok{nc, }\KeywordTok{aes}\NormalTok{(}\DataTypeTok{fill=}\NormalTok{jags_pred))}
+\end{Highlighting}
+\end{Shaded}
+
+\includegraphics{Lec19_files/figure-beamer/unnamed-chunk-16-1.pdf}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\KeywordTok{ggplot}\NormalTok{() }\OperatorTok{+}\StringTok{ }\KeywordTok{geom_sf}\NormalTok{(}\DataTypeTok{data=}\NormalTok{nc, }\KeywordTok{aes}\NormalTok{(}\DataTypeTok{fill=}\NormalTok{jags_resid))}
+\end{Highlighting}
+\end{Shaded}
+
+\includegraphics{Lec19_files/figure-beamer/unnamed-chunk-16-2.pdf}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+
+\KeywordTok{ggplot}\NormalTok{(nc, }\KeywordTok{aes}\NormalTok{(}\DataTypeTok{x=}\NormalTok{car_pred, }\DataTypeTok{y=}\NormalTok{jags_pred)) }\OperatorTok{+}\StringTok{ }\KeywordTok{geom_point}\NormalTok{()}
+\end{Highlighting}
+\end{Shaded}
+
+\includegraphics{Lec19_files/figure-beamer/unnamed-chunk-16-3.pdf}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+
+\KeywordTok{sqrt}\NormalTok{(}\KeywordTok{mean}\NormalTok{(nc}\OperatorTok{$}\NormalTok{jags_resid}\OperatorTok{^}\DecValTok{2}\NormalTok{))}
+\NormalTok{## [1] 3.987985}
+\KeywordTok{sqrt}\NormalTok{(}\KeywordTok{mean}\NormalTok{(nc}\OperatorTok{$}\NormalTok{car_resid}\OperatorTok{^}\DecValTok{2}\NormalTok{))}
+\NormalTok{## [1] 3.72107}
+\KeywordTok{sqrt}\NormalTok{(}\KeywordTok{mean}\NormalTok{(nc}\OperatorTok{$}\NormalTok{sar_resid}\OperatorTok{^}\DecValTok{2}\NormalTok{))}
+\NormalTok{## [1] 3.762664}
+\end{Highlighting}
+\end{Shaded}
+
