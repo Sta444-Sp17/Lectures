@@ -1,0 +1,7 @@
+"0","d_g = anguilla %>% "
+"0","  add_predictions(g, var=""p_hat"") %>%"
+"0","  mutate(p_hat = inv_logit(p_hat)) %>%"
+"0","  mutate(resid = presence - p_hat) %>%"
+"0","  mutate(p_hat_bin = p_hat - (p_hat %% 0.025))"
+"0","ggplot(d_g, aes(x=p_hat, y=resid)) +"
+"0","    geom_point()"

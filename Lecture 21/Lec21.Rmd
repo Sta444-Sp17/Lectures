@@ -1,0 +1,508 @@
+
+---
+title: "Lecture 21" 
+subtitle: "More Spatial Random Effects Models"
+author: "Colin Rundel"
+date: "04/10/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE)
+options(width=80)
+
+set.seed(20170410)
+
+library(magrittr)
+library(ggplot2)
+library(tidyr)
+library(rjags)
+library(gridExtra)
+library(purrr)
+library(forcats)
+library(fields)
+library(sf)
+library(raster)
+library(dplyr)
+
+library(maptools)
+data(wrld_simpl)
+world = st_as_sf(wrld_simpl)
+
+
+theme_set(
+  theme_bw()  
+)
+
+get_coda_parameter = function(coda, pattern)
+{
+  w = coda[[1]] %>% colnames() %>% str_detect(pattern)
+  coda[[1]][,w,drop=FALSE]
+}
+
+post_summary = function(m, ci_width=0.95)
+{
+  d = data_frame(
+    post_mean  = apply(m, 2, mean),
+    post_med   = apply(m, 2, median),
+    post_lower = apply(m, 2, quantile, probs=(1-ci_width)/2),
+    post_upper = apply(m, 2, quantile, probs=1 - (1-ci_width)/2)
+  )
+  
+  if (!is.null(colnames(m)))
+    d = d %>% mutate(param = colnames(m)) %>% dplyr::select(param,post_mean:post_upper)
+  
+  d
+}
+
+strip_attrs = function(obj)
+{
+  attributes(obj) = NULL
+  obj
+}
+
+strip_class = function(obj)
+{
+  attr(obj,"class") = NULL
+  obj
+}
+```
+
+
+# Loa Loa Example
+
+## Loa Loa
+
+\begin{center}
+\includegraphics[width=0.7\textwidth]{figs/loa_loa_LifeCycle.png}
+\end{center}
+
+## Data
+
+```{r}
+library(PrevMap)
+loaloa = tbl_df(loaloa) %>% setNames(., tolower(names(.)))
+
+loaloa
+```
+
+## Spatial Distribution
+
+```{r echo=FALSE}
+africa = st_read("../../data/AfricanCountries/", quiet = TRUE)
+w_africa = africa %>% filter(COUNTRY %in% c("Cameroon", "Nigeria", "Central African Republic", "Gabon", "Congo", "Equatorial Guinea", "Chad"))
+
+ggplot() +
+  geom_sf(data=w_africa) +
+  geom_point(data=loaloa, aes(x=longitude, y=latitude, size=no_exam, color=no_inf/no_exam), alpha=0.8) +
+  xlim(7.5,16) + ylim(2,12) +
+  scale_size(range=c(0.1,5))
+```
+
+
+## Normalized Difference Vegetation Index (NVDI) {.t}
+
+\vspace{-2.5mm}
+
+\begin{center}
+\includegraphics[width=0.6\textwidth]{figs/ndvi_cameroon.pdf} \\
+\includegraphics[width=0.6\textwidth]{figs/ndvi_cameroon_scale.pdf}
+\end{center}
+
+
+## Paper / Data summary
+
+Original paper - Diggle, et. al. (2007). *Spatial modelling and prediction of Loa loa risk: decision making under uncertainty*. Annals of Tropical Medicine and Parasitology, 101, 499-509.
+
+\vspace{4mm}
+
+* `no_exam` and `no_inf` - Collected between 1991 and 2001 by NGOs (original paper mentions 168 villages and 21,938 observations)
+
+\vspace{2mm}
+
+* `elevation` - USGS gtopo30 (1km resolution)
+
+\vspace{2mm}
+
+* `mean9901` to `stdev9901` - aggregated data from 1999 to 2001 he Flemish Institute for Technological Research (1 km resolution)
+
+
+## Diggle's Model
+
+$$ \log \left( \frac{p(x)}{1-p(x)} \right) = \alpha + f_1(\text{ELEVATION}) + f_2(\text{max (NDVI)}) + f_3(\text{sd (NDVI)}) + S(X) $$
+
+where
+
+$$ S(X) \sim \mathcal{N}(0, \Sigma) $$
+$$ \{\Sigma\}_{ij} = \sigma^2 \, \exp(-d \,\phi) $$
+
+
+## EDA
+
+```{r echo=FALSE, fig.width=5, fig.align="center", out.width="0.8\\textwidth"}
+logit = function(p) log(p/(1-p))
+loaloa = loaloa %>%
+  mutate(prop = no_inf/no_exam) %>%
+  mutate(logit_prop = logit(prop)) %>%
+  mutate(logit_prop = ifelse(is.finite(logit_prop), logit_prop, NA))
+
+
+grid.arrange(
+  ggplot(loaloa, aes(x=elevation, y=logit_prop)) + geom_point() + 
+    geom_vline(xintercept=c(1000,1300), color="red"),
+  ggplot(loaloa, aes(x=max9901, y=logit_prop)) + geom_point() + 
+    geom_vline(xintercept=c(0.8), color="red"),
+  ggplot(loaloa, aes(x=stdev9901, y=logit_prop)) + geom_point(),
+  ncol=1
+)
+```
+
+## Diggle's EDA
+
+\begin{center}
+\includegraphics[width=0.7\textwidth]{figs/diggle_eda.pdf} \\
+\end{center}
+
+
+## Model EDA
+
+\scriptoutput
+
+```{r}
+loaloa = loaloa %>% 
+  mutate(elev_factor = cut(elevation, breaks=c(0,1000,1300,2000), dig.lab=5),
+         max_factor  = cut(max9901, breaks=c(0,0.8,1)))
+
+g = glm(no_inf/no_exam ~ elevation:elev_factor + max9901:max_factor + stdev9901, 
+        data=loaloa, family=binomial, weights=loaloa$no_exam)
+
+summary(g)
+```
+
+## Residuals
+
+\scriptoutput
+
+```{r out.width="0.75\\textwidth"}
+loaloa = loaloa %>% 
+  mutate(pred_prop = predict(g, type="response"),
+         resid = prop - pred_prop)
+
+ggplot(loaloa, aes(x=prop, y=pred_prop)) + 
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0)
+```
+
+## Spatial Structure
+
+```{r}
+library(geoR)
+
+variog(coords = cbind(loaloa$longitude, loaloa$latitude), 
+       data = loaloa$resid,
+       uvec = seq(0, 4, length.out = 50)) %>% plot()
+```
+
+
+## `spBayes` GLM Model {.t}
+
+\scriptoutput
+
+```{r eval=FALSE}
+library(spBayes)
+
+spg = spGLM(no_inf/no_exam ~ elevation:elev_factor + max9901:max_factor + stdev9901, 
+            data=loaloa, family="binomial", weights=loaloa$no_exam, 
+            coords=cbind(loaloa$longitude, loaloa$latitude),
+            cov.model="exponential", n.samples=20000,
+            #starting=list(beta=coefficients(g), phi=9, sigma.sq=1, w=0),
+            starting=list(beta=rep(0,7), phi=3, sigma.sq=1, w=0),
+            priors=list(phi.unif=c(0.1, 10), sigma.sq.ig=c(2, 2)),
+            amcmc=list(n.batch=1000, batch.length=20, accept.rate=0.43))
+
+save(spg, loaloa, file="loaloa.Rdata")
+```
+
+```{r echo=FALSE}
+library(spBayes)
+load(file="loaloa.Rdata")
+```
+
+##
+
+\footnotesize
+
+```{r}
+spg$p.beta.theta.samples %>% 
+  post_summary() %>% 
+  knitr::kable(digits=5)
+```
+
+## Prediction
+
+```{r echo=FALSE, message=FALSE}
+n_samp = nrow(spg$p.beta.theta.samples)
+spg_pred_summary = spPredict(spg, pred.coords=spg$coords, pred.covars=spg$X,
+                             start=n_samp/2+1, thin=(n_samp/2)/1000, verbose=FALSE) %>%
+  .$p.y.predictive.samples %>%
+  t() %>%
+  post_summary()
+
+loaloa = loaloa %>%
+  mutate(pred_spg_mean = spg_pred_summary$post_mean,
+         pred_spg_med = spg_pred_summary$post_med)
+
+ggplot(loaloa, aes(x=prop, y=pred_spg_mean)) + 
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0)
+```
+
+
+
+## `spBayes` GLM Model - Fixed? {.t}
+
+\scriptoutput
+
+```{r eval=FALSE}
+library(spBayes)
+
+spg_good = spGLM(no_inf ~ elevation:elev_factor + max9901:max_factor + stdev9901, 
+                 data=loaloa, family="binomial", weights=loaloa$no_exam, 
+                 coords=cbind(loaloa$longitude, loaloa$latitude),
+                 cov.model="exponential", n.samples=20000,
+                 #starting=list(beta=coefficients(g), phi=9, sigma.sq=1, w=0),
+                 starting=list(beta=rep(0,7), phi=3, sigma.sq=1, w=0),
+                 priors=list(phi.unif=c(0.1, 10), sigma.sq.ig=c(2, 2)),
+                 amcmc=list(n.batch=1000, batch.length=20, accept.rate=0.43))
+
+save(spg_good, loaloa, file="loaloa_good.Rdata")
+```
+
+```{r echo=FALSE}
+load("loaloa_good.Rdata")
+```
+
+
+##
+
+\footnotesize
+
+```{r}
+spg_good$p.beta.theta.samples %>% 
+  post_summary() %>% 
+  knitr::kable(digits=5)
+```
+
+## Prediction 
+
+```{r echo=FALSE, message=FALSE}
+n_samp = nrow(spg_good$p.beta.theta.samples)
+spg_pred_summary = spPredict(spg_good, pred.coords=spg_good$coords, pred.covars=spg_good$X,
+                             start=n_samp/2+1, thin=(n_samp/2)/1000, verbose=FALSE) %>%
+  .$p.y.predictive.samples %>%
+  t() %>%
+  post_summary()
+
+loaloa = loaloa %>%
+  mutate(pred_spg_mean = spg_pred_summary$post_mean,
+         pred_spg_med = spg_pred_summary$post_med)
+
+ggplot(loaloa, aes(x=prop, y=pred_spg_mean)) + 
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0)
+```
+
+## Diggle's Predictive Surface
+
+\begin{center}
+\includegraphics[width=0.9\textwidth]{figs/diggle_fig2.pdf}
+\end{center}
+
+## Exceedance Probability - Posterior Summary
+
+```{r echo=FALSE}
+i = c(13, 78, 6, 151)
+
+pred = spPredict(spg_good, 
+                 pred.coords=spg_good$coords[i,,drop=FALSE], 
+                 pred.covars=spg_good$X[i,,drop=FALSE],
+                 start=n_samp/2+1, thin=(n_samp/2)/1000, verbose=FALSE)
+
+pred$p.y.predictive.samples %>%
+  t() %>%
+  as.data.frame() %>%
+  setNames(paste0("Village ", loaloa$villcode[i])) %>%
+  gather(village, p) %>%
+  ggplot(aes(x=p, fill=village)) +
+    geom_density() +
+    facet_wrap(~village)
+```
+
+## Exceedance Probability Predictive Surface
+
+\begin{center}
+\includegraphics[width=0.9\textwidth]{figs/diggle_fig4.pdf}
+\end{center}
+
+
+
+
+
+# Spatial Assignment of Migratory Birds
+
+## Background
+
+Using intrinsic markers (genetic and isotopic signals) for the purpose of inferring migratory connectivity.
+
+\vspace{2mm}
+
+* Existing methods are too coarse for most applications
+
+\vspace{2mm}
+
+* Large amounts of data are available ( \textgreater{}150,000 feather samples from \textgreater{}500 species)
+
+\vspace{2mm}
+
+* Genetic assignment methods are based on Wasser, et al. (2004)
+
+\vspace{2mm}
+
+* Isotopic assignment methods are based on Wunder, et al. (2005)
+
+
+
+## Data - DNA microsatellites and $\delta \isotope[2]{H}$
+
+\begin{columns}[t]
+\column{0.5\textwidth}
+Hermit Thrush (\textit{Catharus guttatus}) \\
+\vspace{2mm}
+\begin{itemize}
+\item 138 individuals
+\item 14 locations
+\item 6 loci
+\item 9-27 alleles / locus
+\end{itemize}
+\column{0.5\textwidth}
+Wilson's Warbler (\textit{Wilsonia pusilla}) \\
+\vspace{2mm}
+\begin{itemize}
+\item 163 individuals
+\item 8 locations
+\item 9 loci
+\item 15-31 alleles / locus
+\end{itemize}
+
+\end{columns}
+
+\vspace{5mm}
+
+\begin{columns}[t]
+\column{0.5\textwidth}
+\begin{center}
+\includegraphics[width=0.65\textwidth]{figs/hermit_thrush.jpeg}
+\end{center}
+\column{0.5\textwidth}
+\begin{center}
+\includegraphics[width=0.65\textwidth]{figs/wilsons_warbler.jpeg}
+\end{center}
+\end{columns}
+
+
+## Sampling Locations
+
+\begin{center}
+\includegraphics[width=\textwidth]{figs/sampling_locs.pdf}
+\end{center}
+
+
+
+## Allele Frequency Model
+
+For the allele $i$, from locus $l$, at location $k$
+
+$$
+\begin{aligned}
+\bm{y}_{\cdot l k}|\bm{\Theta} &\sim \mathcal{N}\left(\textstyle\sum_i y_{ilk},\: \bm{f}_{\cdot l k}\right) \\
+\\
+f_{ilk} &= \frac{\exp(\Theta_{ilk})}{\sum_i \exp(\Theta_{ilk})} \\
+\\
+\bm{\Theta}_{il}|\bm{\alpha},\bm{\mu} &\sim \mathcal{N}( \bm{\mu}_{il},\, \bm{\Sigma_{}}) \\
+\end{aligned}
+$$
+
+\[ \left\{\Sigma\right\}_{ij} = \sigma^2 \, \exp \Big(-(\{d\}_{ij}\, r)^{\psi} \Big) + \sigma^2_n \, {1}_{i=j} \]
+
+## Predictions by Allele (Locus 3)
+
+\begin{center}
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-1.png}
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-2.png}
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-3.png} \\
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-4.png}
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-5.png}
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-6.png} \\
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-7.png}
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-8.png}
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-9.png}
+\end{center}
+
+
+## Genetic Assignment Model
+
+Assignment model assuming Hardy-Weinberg equilibrium and allowing for genotyping ($\delta$) and single amplification ($\gamma$) errors.
+
+$$
+\begin{aligned}
+P(S_G|\bm{f},k) &= \prod_l P(i_l, j_l | \bm{f},k) \\
+\\
+P(i_l, j_l | \bm{f},k) &= 
+\begin{cases}
+\gamma P(i_l|\bm{f},k) + (1-\gamma)P(i_l|\bm{\tilde f},k)^2 & \text{if $i=j$} \vspace{2mm} \\
+(1-\gamma) P(i_l|\bm{f},k) P(j_l|\bm{f},k)      & \text{if $i \ne j$}
+\end{cases} \\
+\\
+P(i_l|\bm{f},k) &= (1-\delta) f_{lik} + \delta / m_l
+\end{aligned}
+$$
+
+
+## Combined Model
+
+\begin{center}
+Genetic \qquad\qquad\qquad\quad
+Isotopic \qquad\qquad\qquad\quad
+Combined
+\end{center}
+
+\begin{center}
+\includegraphics[width=\textwidth]{figs/hermit_maps.pdf}
+\end{center}
+
+
+
+## Model Assessment
+
+\begin{center}
+\includegraphics[width=\textwidth]{figs/ROCs.pdf}
+\end{center}
+
+
+
+## Migratory Connectivity
+
+\begin{center}
+\includegraphics[width=0.9\textwidth]{figs/wintering.pdf}
+\end{center}

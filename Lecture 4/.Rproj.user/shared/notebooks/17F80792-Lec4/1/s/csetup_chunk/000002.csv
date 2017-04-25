@@ -1,0 +1,8 @@
+"0","library(rjags)"
+"0","library(modelr)"
+"0","library(ggplot2)"
+"0","library(dplyr)"
+"0","library(shiny)"
+"0","library(tidyr)"
+"0","library(purrr)"
+"0","library(gridExtra)"

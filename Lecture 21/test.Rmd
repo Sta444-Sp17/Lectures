@@ -1,0 +1,169 @@
+
+---
+title: "Lecture 21" 
+subtitle: "More Spatial Random Effects Models"
+author: "Colin Rundel"
+date: "04/10/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+# Spatial Assignment of Migratory Birds
+
+## Background
+
+Using intrinsic markers (genetic and isotopic signals) for the purpose of inferring migratory connectivity.
+
+\vspace{2mm}
+
+* Existing methods are too coarse for most applications
+
+\vspace{2mm}
+
+* Large amounts of data are available ( \textgreater{}150,000 feather samples from \textgreater{}500 species)
+
+\vspace{2mm}
+
+* Genetic assignment methods are based on Wasser, et al. (2004)
+
+\vspace{2mm}
+
+* Isotopic assignment methods are based on Wunder, et al. (2005)
+
+
+
+## Data - DNA microsatellites and $\delta \isotope[2]{H}$
+
+\begin{columns}[t]
+\column{0.5\textwidth}
+Hermit Thrush (\textit{Catharus guttatus}) \\
+\vspace{2mm}
+\begin{itemize}
+\item 138 individuals
+\item 14 locations
+\item 6 loci
+\item 9-27 alleles / locus
+\end{itemize}
+\column{0.5\textwidth}
+Wilson's Warbler (\textit{Wilsonia pusilla}) \\
+\vspace{2mm}
+\begin{itemize}
+\item 163 individuals
+\item 8 locations
+\item 9 loci
+\item 15-31 alleles / locus
+\end{itemize}
+
+\end{columns}
+
+\vspace{5mm}
+
+\begin{columns}[t]
+\column{0.5\textwidth}
+\begin{center}
+\includegraphics[width=0.65\textwidth]{figs/hermit_thrush.jpeg}
+\end{center}
+\column{0.5\textwidth}
+\begin{center}
+\includegraphics[width=0.65\textwidth]{figs/wilsons_warbler.jpeg}
+\end{center}
+\end{columns}
+
+
+## Sampling Locations
+
+\begin{center}
+\includegraphics[width=\textwidth]{figs/sampling_locs.pdf}
+\end{center}
+
+
+
+## Allele Frequency Model
+
+For the allele $i$, from locus $l$, at location $k$
+
+$$
+\begin{aligned}
+\bm{y}_{\cdot l k}|\bm{\Theta} &\sim \mathcal{N}\left(\textstyle\sum_i y_{ilk},\: \bm{f}_{\cdot l k}\right) \\
+\\
+f_{ilk} &= \frac{\exp(\Theta_{ilk})}{\sum_i \exp(\Theta_{ilk})} \\
+\\
+\bm{\Theta}_{il}|\bm{\alpha},\bm{\mu} &\sim \mathcal{N}( \bm{\mu}_{il},\, \bm{\Sigma_{}}) \\
+\end{aligned}
+$$
+
+\[ \left\{\Sigma\right\}_{ij} = \sigma^2 \, \exp \Big(-(\{d\}_{ij}\, r)^{\psi} \Big) + \sigma^2_n \, {1}_{i=j} \]
+
+## Predictions by Allele (Locus 3)
+
+\begin{center}
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-1.png}
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-2.png}
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-3.png} \\
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-4.png}
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-5.png}
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-6.png} \\
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-7.png}
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-8.png}
+\includegraphics[width=0.25\textwidth]{figs/allele3/Med-Al3-9.png}
+\end{center}
+
+
+## Genetic Assignment Model
+
+Assignment model assuming Hardy-Weinberg equilibrium and allowing for genotyping ($\delta$) and single amplification ($\gamma$) errors.
+
+$$
+\begin{aligned}
+P(S_G|\bm{f},k) &= \prod_l P(i_l, j_l | \bm{f},k) \\
+\\
+P(i_l, j_l | \bm{f},k) &= 
+\begin{cases}
+\gamma P(i_l|\bm{f},k) + (1-\gamma)P(i_l|\bm{\tilde f},k)^2 & \text{if $i=j$} \vspace{2mm} \\
+(1-\gamma) P(i_l|\bm{f},k) P(j_l|\bm{f},k)      & \text{if $i \ne j$}
+\end{cases} \\
+\\
+P(i_l|\bm{f},k) &= (1-\delta) f_{lik} + \delta / m_l
+\end{aligned}
+$$
+
+
+## Combined Model
+
+\begin{center}
+Genetic \qquad\qquad\qquad\quad
+Isotopic \qquad\qquad\qquad\quad
+Combined
+\end{center}
+
+\begin{center}
+\includegraphics[width=\textwidth]{figs/hermit_maps.pdf}
+\end{center}
+
+
+
+## Model Assessment
+
+\begin{center}
+\includegraphics[width=\textwidth]{figs/ROCs.pdf}
+\end{center}
+
+
+
+## Migratory Connectivity
+
+\begin{center}
+\includegraphics[width=0.9\textwidth]{figs/wintering.pdf}
+\end{center}
+
+

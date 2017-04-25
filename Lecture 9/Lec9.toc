@@ -1,0 +1,5 @@
+\beamer@endinputifotherversion {3.36pt}
+\select@language {english}
+\beamer@sectionintoc {1}{\(MA(\infty )\)}{2}{0}{1}
+\beamer@sectionintoc {2}{Differencing}{9}{0}{2}
+\beamer@sectionintoc {3}{\(ARIMA\)}{14}{0}{3}

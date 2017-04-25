@@ -1,0 +1,4 @@
+"0","d_g = d_g %>%"
+"0","  mutate(deviance = sign(presence-p_hat) * sqrt(-2 * (presence * log(p_hat) + (1-presence) * log(1-p_hat))))"
+"0","ggplot(d_g, aes(x=p_hat, y=deviance)) +"
+"0","  geom_point()"

@@ -1,0 +1,3 @@
+"0","d_lm = suppressWarnings( add_predictions(co2_df, lm) )"
+"0","co2_base + "
+"0","  geom_line(data=d_lm, aes(y=pred), col='red', alpha=0.75)"

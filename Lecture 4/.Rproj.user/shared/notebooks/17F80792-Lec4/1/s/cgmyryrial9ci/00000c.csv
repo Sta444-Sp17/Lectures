@@ -1,0 +1,5 @@
+"0","d_g %>% "
+"0","  group_by(p_hat_bin) %>%"
+"0","  summarize(deviance_mean = mean(deviance), deviance_sd = sd(deviance)) %>%"
+"0","  ggplot(aes(x=p_hat_bin, y=deviance_mean)) +"
+"0","    geom_point()"

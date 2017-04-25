@@ -1,0 +1,49 @@
+\frametitle{Why not a fixed effect for Subject?}
+
+\small
+
+Not going to bother with the Bayesian model here because of all the
+dummy coding and betas \ldots{}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{l =}\StringTok{ }\KeywordTok{lm}\NormalTok{(Reaction }\OperatorTok{~}\StringTok{ }\NormalTok{Days }\OperatorTok{+}\StringTok{ }\NormalTok{Subject, }\DataTypeTok{data=}\NormalTok{sleepstudy)}
+\KeywordTok{summary}\NormalTok{(l)}
+\NormalTok{## }
+\NormalTok{## Call:}
+\NormalTok{## lm(formula = Reaction ~ Days + Subject, data = sleepstudy)}
+\NormalTok{## }
+\NormalTok{## Residuals:}
+\NormalTok{##      Min       1Q   Median       3Q      Max }
+\NormalTok{## -100.540  -16.389   -0.341   15.215  131.159 }
+\NormalTok{## }
+\NormalTok{## Coefficients:}
+\NormalTok{##              Estimate Std. Error t value Pr(>|t|)    }
+\NormalTok{## (Intercept)  295.0310    10.4471  28.240  < 2e-16 ***}
+\NormalTok{## Days          10.4673     0.8042  13.015  < 2e-16 ***}
+\NormalTok{## Subject309  -126.9008    13.8597  -9.156 2.35e-16 ***}
+\NormalTok{## Subject310  -111.1326    13.8597  -8.018 2.07e-13 ***}
+\NormalTok{## Subject330   -38.9124    13.8597  -2.808 0.005609 ** }
+\NormalTok{## Subject331   -32.6978    13.8597  -2.359 0.019514 *  }
+\NormalTok{## Subject332   -34.8318    13.8597  -2.513 0.012949 *  }
+\NormalTok{## Subject333   -25.9755    13.8597  -1.874 0.062718 .  }
+\NormalTok{## Subject334   -46.8318    13.8597  -3.379 0.000913 ***}
+\NormalTok{## Subject335   -92.0638    13.8597  -6.643 4.51e-10 ***}
+\NormalTok{## Subject337    33.5872    13.8597   2.423 0.016486 *  }
+\NormalTok{## Subject349   -66.2994    13.8597  -4.784 3.87e-06 ***}
+\NormalTok{## Subject350   -28.5312    13.8597  -2.059 0.041147 *  }
+\NormalTok{## Subject351   -52.0361    13.8597  -3.754 0.000242 ***}
+\NormalTok{## Subject352    -4.7123    13.8597  -0.340 0.734300    }
+\NormalTok{## Subject369   -36.0992    13.8597  -2.605 0.010059 *  }
+\NormalTok{## Subject370   -50.4321    13.8597  -3.639 0.000369 ***}
+\NormalTok{## Subject371   -47.1498    13.8597  -3.402 0.000844 ***}
+\NormalTok{## Subject372   -24.2477    13.8597  -1.750 0.082108 .  }
+\NormalTok{## ---}
+\NormalTok{## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1}
+\NormalTok{## }
+\NormalTok{## Residual standard error: 30.99 on 161 degrees of freedom}
+\NormalTok{## Multiple R-squared:  0.7277, Adjusted R-squared:  0.6973 }
+\NormalTok{## F-statistic: 23.91 on 18 and 161 DF,  p-value: < 2.2e-16}
+\end{Highlighting}
+\end{Shaded}
+

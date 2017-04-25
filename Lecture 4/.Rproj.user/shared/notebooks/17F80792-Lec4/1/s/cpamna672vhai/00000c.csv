@@ -1,0 +1,5 @@
+"0","d_g %>% "
+"0","  group_by(p_hat_bin) %>%"
+"0","  summarize(pearson_mean = mean(pearson), resid_sd = sd(pearson)) %>%"
+"0","  ggplot(aes(x=p_hat_bin, y=pearson_mean)) +"
+"0","    geom_point()"

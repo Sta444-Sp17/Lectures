@@ -1,0 +1,3 @@
+"0","g = glm(cases~year, data=aids, family=poisson)"
+"0","pred = data_frame(year=seq(1981,1993,by=0.1))"
+"0","pred$cases = predict(g, newdata=pred, type = ""response"")"

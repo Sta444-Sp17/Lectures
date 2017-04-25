@@ -1,0 +1,24 @@
+\frametitle{Using \texttt {forecast} - random walk with drift}
+
+Some of R's base timeseries handling is a bit wonky, the
+\texttt{forecast} package offers some useful alternatives and additional
+functionality.
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{rwd =}\StringTok{ }\KeywordTok{arima.sim}\NormalTok{(}\DataTypeTok{n=}\DecValTok{500}\NormalTok{, }\DataTypeTok{model=}\KeywordTok{list}\NormalTok{(}\DataTypeTok{order=}\KeywordTok{c}\NormalTok{(}\DecValTok{0}\NormalTok{,}\DecValTok{1}\NormalTok{,}\DecValTok{0}\NormalTok{)), }\DataTypeTok{mean=}\FloatTok{0.1}\NormalTok{) }
+\KeywordTok{library}\NormalTok{(forecast)}
+\KeywordTok{Arima}\NormalTok{(rwd, }\DataTypeTok{order =} \KeywordTok{c}\NormalTok{(}\DecValTok{0}\NormalTok{,}\DecValTok{1}\NormalTok{,}\DecValTok{0}\NormalTok{), }\DataTypeTok{include.constant =} \OtherTok{TRUE}\NormalTok{)}
+\NormalTok{## Series: rwd }
+\NormalTok{## ARIMA(0,1,0) with drift         }
+\NormalTok{## }
+\NormalTok{## Coefficients:}
+\NormalTok{##        drift}
+\NormalTok{##       0.0641}
+\NormalTok{## s.e.  0.0431}
+\NormalTok{## }
+\NormalTok{## sigma^2 estimated as 0.9323:  log likelihood=-691.44}
+\NormalTok{## AIC=1386.88   AICc=1386.91   BIC=1395.31}
+\end{Highlighting}
+\end{Shaded}
+

@@ -1,0 +1,612 @@
+
+---
+title: "Lecture 20" 
+subtitle: "Spatial Random Effects Models \n+ Point Reference Spatial Data"
+author: "Colin Rundel"
+date: "04/03/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE)
+options(width=70)
+
+set.seed(20170405)
+
+library(raster)
+library(magrittr)
+library(modelr)
+library(ggplot2)
+library(tidyr)
+library(rjags)
+library(stringr)
+library(gridExtra)
+library(readr)
+library(purrr)
+library(forcats)
+library(forecast)
+library(astsa)
+library(fields)
+library(readr)
+library(sf)
+library(forcats)
+library(dplyr)
+
+theme_set(
+  theme_bw()  
+)
+
+get_coda_parameter = function(coda, pattern)
+{
+  w = coda[[1]] %>% colnames() %>% str_detect(pattern)
+  coda[[1]][,w,drop=FALSE]
+}
+
+post_summary = function(m, ci_width=0.95)
+{
+  d = data_frame(
+    post_mean  = apply(m, 2, mean),
+    post_med   = apply(m, 2, median),
+    post_lower = apply(m, 2, quantile, probs=(1-ci_width)/2),
+    post_upper = apply(m, 2, quantile, probs=1 - (1-ci_width)/2)
+  )
+  
+  if (!is.null(colnames(m)))
+    d = d %>% mutate(param = colnames(m)) %>% select(param,post_mean:post_upper)
+  
+  d
+}
+
+strip_attrs = function(obj)
+{
+  attributes(obj) = NULL
+  obj
+}
+
+strip_class = function(obj)
+{
+  attr(obj,"class") = NULL
+  obj
+}
+```
+
+
+# Spatial Random Effects Models
+
+## Scottish Lip Cancer Data
+
+```{r echo=FALSE}
+load("../../data/scottish_lip_cancer.Rdata")
+
+lip_cancer %>% 
+  gather(var, value, Observed:Expected) %>%
+  ggplot() +
+    geom_sf(aes(fill=value), color=NA) +
+    facet_wrap(~as_factor(var))
+```
+
+##
+
+```{r echo=FALSE}
+grid.arrange(
+  ggplot(lip_cancer) +
+    geom_sf(aes(fill=Observed/Expected), color=NA) + 
+    labs(title="Obs/Exp",fill=""),
+  ggplot(lip_cancer) +
+    geom_sf(aes(fill=pcaff), color=NA) +
+    labs(title="% Agg Fish Forest",fill=""),
+  ncol=2
+)
+```
+
+## Neighborhood / weight matrix
+
+\vspace{-4mm}
+
+```{r echo=FALSE, fig.height=6, fig.width=4, out.height="\\textheight", fig.align="center"}
+library(spdep)
+
+W = st_distance(lip_cancer) %>% strip_class() < 1e-6
+
+Wlist = mat2listw(W)
+
+plot(st_geometry(lip_cancer)) 
+plot(Wlist, coords = st_coordinates(st_centroid(lip_cancer)), add=TRUE, col="blue", pch=16)
+```
+
+
+## Moran's I
+
+\scriptoutput
+
+```{r}
+morans_I = function(y, w)
+{
+  n = length(y)
+  y_bar = mean(y)
+  num = sum(w * (y-y_bar) %*% t(y-y_bar))  
+  denom = sum( (y-y_bar)^2 )
+  (n/sum(w)) * (num/denom)
+}
+
+morans_I(y = lip_cancer$Observed, w = diag(rowSums(W)) %*% W)
+
+morans_I(y = lip_cancer$Observed / lip_cancer$Expected, 
+         w = diag(rowSums(W)) %*% W)
+
+ape::Moran.I(lip_cancer$Observed / lip_cancer$Expected, 
+             weight = diag(rowSums(W)) %*% W) %>% str()
+```
+
+
+## A hierachical model for lip cancer {.t}
+
+We have observed counts of lip cancer for 56 districts in Scotland. Let $y_i$ represent the number of lip cancer for district $i$.
+
+$$\begin{aligned}
+y_i &\sim \text{Poisson}(\lambda_i) \\
+\\
+\log(\lambda_i) &= \log(E_i) + x_i \beta + \omega_i \\
+\\
+\bm\omega &\sim \mathcal{N}(\bm{0},~\sigma^2(\bm{D}-\phi\,\bm{W})^{-1})
+\end{aligned}$$
+
+where $E_i$ is the expected counts for each region (and serves as an offet).
+
+
+## Data prep & JAGS model
+
+\scriptoutput
+
+```{r}
+D = diag(rowSums(W))
+X = model.matrix(~scale(lip_cancer$pcaff))
+log_offset = log(lip_cancer$Expected)
+y = lip_cancer$Observed
+```
+
+```{r echo=FALSE}
+pois_model = "model{
+  for(i in 1:length(y)) {
+    y[i] ~ dpois(lambda[i])
+    y_pred[i] ~ dpois(lambda[i])
+    log(lambda[i]) <- log_offset[i] + X[i,] %*% beta + omega[i]
+  }
+
+  for(i in 1:2) {
+    beta[i] ~ dnorm(0,1)
+  }
+
+  omega ~ dmnorm(rep(0,length(y)), tau * (D - phi*W))
+  sigma2 <- 1/tau
+  tau ~ dgamma(2, 2)
+  phi ~ dunif(0,0.99)
+}"
+cat(pois_model,"\n")
+```
+
+## Model Results
+
+```{r echo=FALSE}
+if (!file.exists("pois_model.Rdata"))
+{
+  m = jags.model(
+    textConnection(pois_model), 
+    data = list(
+      D = D,
+      y = y,
+      X = X,
+      W = W,
+      log_offset = log_offset
+    ),
+    n.adapt=10000
+  )
+
+  update(m, n.iter=25000)#, progress.bar="none")
+  
+  pois_coda = coda.samples(
+    m, variable.names=c("sigma2","tau", "beta", "omega", "phi", "y_pred"),
+    n.iter=25000, thin=25
+  )
+  save(pois_coda, m, file="pois_model.Rdata")
+} else {
+  load("pois_model.Rdata")
+}
+
+beta_params = get_coda_parameter(pois_coda,"beta")
+ar_params = get_coda_parameter(pois_coda,"sigma|phi")
+omega = get_coda_parameter(pois_coda,"omega") %>% post_summary()
+y_pred = get_coda_parameter(pois_coda,"y_pred") %>% post_summary()
+```
+
+```{r echo=FALSE}
+plot(beta_params)
+```
+
+##
+
+```{r echo=FALSE}
+plot(ar_params)
+```
+
+## Predictions & Residuals
+
+```{r echo=FALSE}
+lip_cancer_pred = lip_cancer %>% mutate(obs_pred = y_pred$post_mean, resid = Observed - y_pred$post_mean)
+
+
+grid.arrange(
+  ggplot(lip_cancer_pred) +
+    geom_sf(aes(fill=obs_pred), color=NA) + 
+    labs(title="Predicted Cases",fill=""),
+  ggplot(lip_cancer_pred) +
+    geom_sf(aes(fill=resid), color=NA) +
+    labs(title="Residuals",fill=""),
+  ncol=2
+)
+```
+
+
+## Residuals + RMSE + Moran's I {.t}
+
+```{r}
+#RMSE
+lip_cancer_pred$resid %>% .^2 %>% mean() %>% sqrt()
+
+
+#Moran's I
+morans_I(y = lip_cancer_pred$resid, w = diag(rowSums(W)) %*% W)
+
+ape::Moran.I(lip_cancer_pred$resid, 
+             weight = diag(rowSums(W)) %*% W) %>% str()
+```
+
+
+
+# Point Referenced Data
+
+## Example - PM2.5 from CSN
+
+The Chemical Speciation Network are a series of air quality monitors run by EPA (221 locations in 2007). We'll look at a subset of the data from Nov 11th, 2007 (n=191) for just PM2.5. 
+
+```{r echo=FALSE}
+library(lubridate)
+load("../../data/epa/csn.Rdata")
+
+csn = csn %>% 
+  select(site:date, pm25) %>% 
+  na.omit() %>% 
+  filter(date == ymd("2007-11-14")) %>% 
+  filter(longitude > -140) %>% # Remove Hawaii Location
+  tbl_df()
+
+us = map_data("state")
+
+ggplot() +
+  geom_map(data=us, map=us, aes(x=long, y=lat, map_id=region), color="grey", fill=NA) +
+  geom_point(data=csn, aes(x=longitude, y=latitude, color=pm25, size=pm25), alpha=1) +
+  scale_colour_gradient(low="#fee6ce", high="#e6550d") +
+  scale_size(range=c(2,5))
+```
+
+##
+
+```{r}
+csn
+```
+
+## Aside - Splines
+
+\begin{center}
+\includegraphics[width=0.49\textwidth]{figs/spline1.png}
+$~$
+\includegraphics[width=0.49\textwidth]{figs/spline2.png}
+\end{center}
+
+## Splines in 1d - Smoothing Splines {.t}
+
+These are a mathematical analogue to the drafting splines represented using a penalized regression model.
+
+. . .
+
+We want to find a function $f(x)$ that best fits our observed data $\bm{y} = y_1, \ldots, y_n$ while being as *smooth* as possible.
+
+$$ \underset{f(x)}{\arg\min} ~ \sum_{i=1}^n\left(y_i - f(x_i)\right)^2 + \lambda \int f''(x)^2 ~ dx $$
+
+
+
+Interestingly, this minimization problem has an exact solution which is given by a mixture of weighted natural cubic splines (cubic splines that are linear in the tails) with knots at the observed data locations ($x$s).
+
+
+
+## Splines in 2d - Thin Plate Splines
+
+Now imagine we have observed data of the form $(x_i, y_i, z_i)$ where we wish to predict $z_i$ given $x_i$ and $y_i$ for all $i$. We can naturally extend the smoothing spline model in two dimensions,
+
+$$ \underset{f(x,y)}{\arg\min} ~~ \sum_{i=1}^n (z_i-f(x_i,y_i))^2 + \lambda \int \int \left(\frac{\partial^2 f}{\partial x^2} + 2 \frac{\partial^2 f}{\partial x \, \partial y} + \frac{\partial^2 f}{\partial y^2} \right) dx\, dy$$
+
+The solution to this equation has a natural representation using a weighted sum of *radial basis functions* with knots at the observed data locations
+ 
+$$ f(x,y) = \sum_{i=1}^n w_i ~ d(x_i,y_i)^2 \log d(x_i,y_i).  $$
+
+## Fitting a TPS {.t}
+
+\scriptoutput
+
+```{r echo=FALSE}
+library(maptools)
+data(wrld_simpl)
+
+
+r = raster(nrows=200, ncol=400,
+           xmn = min(csn$longitude)*1.05, xmx = max(csn$longitude)*0.95,
+           ymn = min(csn$latitude )*0.95, ymx = max(csn$latitude )*1.05)
+
+usa = rasterize(wrld_simpl[wrld_simpl$NAME == "United States",], r)
+
+cells = which(!is.na(usa[]))
+pred_coords = xyFromCell(r, cells)
+```
+
+```{r}
+library(fields)
+coords = select(csn, longitude, latitude) %>% as.matrix()
+tps = Tps(x = coords, Y=csn$pm25)
+
+pm25_pred = r
+pm25_pred[cells] = predict(tps, pred_coords)
+
+plot(pm25_pred)
+points(coords, pch=16, cex=0.5)
+```
+
+
+
+# Gaussin Process Models / Kriging
+
+## Variogram
+
+\scriptoutput
+
+```{r message=FALSE, fig.height=4}
+library(geoR)
+coords = csn %>% select(latitude, longitude) %>% as.matrix()
+d = dist(coords) %>% as.matrix()
+
+variog(coords = coords, data = csn$pm25, messages = FALSE, 
+       uvec = seq(0, max(d)/2, length.out=50)) %>% plot()
+```
+
+
+##
+
+```{r fig.height=4}
+variog(coords = coords, data = csn$pm25, messages = FALSE,
+       uvec = seq(0, max(d)/4, length.out=50)) %>% plot()
+```
+
+
+## Isotropy / Anisotropy
+
+\scriptoutput
+
+```{r message=FALSE}
+v4 = variog4(coords = coords, data = csn$pm25, messages = FALSE,
+             uvec = seq(0, max(d)/4, length.out = 50))
+plot(v4)
+```
+
+## GP Spatial Model
+
+\small
+
+If we assume that our data is *stationary* and *isotropic* then we can use a Gaussian Process model to fit the data. We will assume an exponential covariance structure. 
+
+$$ \bm{y} \sim \mathcal{N}(\mu\bm{1},~\Sigma) $$
+$$ \{\Sigma\}_{ij} = \sigma^2 \exp(- r \, \lVert s_i - s_j\lVert) + \sigma^2_n \, 1_{i=j} $$
+
+. . .
+
+we can also view this as a spatial random effects model where
+
+$$ y(\bm{s}) = \mu(\bm{s}) + w(\bm{s}) + \epsilon(\bm{s}) $$
+$$ w(\bm{s}) \sim \mathcal{N}(0,\Sigma') $$
+$$ \epsilon(s_i) \sim \mathcal{N}(0,\sigma^2_n) $$
+$$ \{\Sigma'\}_{ij} = \sigma^2 \exp(- r \, \lVert s_i - s_j\lVert) $$
+
+## Fitting with `spBayes`
+
+```{r}
+library(spBayes)
+
+n = nrow(csn)
+n_samp = 20000
+coords = select(csn, longitude, latitude) %>% as.matrix()
+max_range = max(dist(coords)) / 4
+
+
+starting = list(phi = 3/3, sigma.sq = 33, tau.sq = 17)
+tuning = list("phi"=0.1, "sigma.sq"=0.1, "tau.sq"=0.1)
+priors = list(
+  beta.Norm = list(0, 1000), 
+  phi.Unif = c(3/max_range, 6), 
+  sigma.sq.IG = c(2, 2), 
+  tau.sq.IG = c(2, 2)
+)
+```
+
+## 
+
+\scriptoutput
+
+```{r}
+m = spLM(pm25 ~ 1, data = csn, coords = coords, starting = starting, priors = priors, 
+         cov.model = "exponential", n.samples = n_samp, tuning = tuning,
+         n.report = n_samp/2)
+```
+
+## 
+
+\scriptoutput
+
+```{r}
+m = spRecover(m, start=n_samp/2+1, thin = (n_samp/2)/1000)
+```
+
+## Parameter values
+
+```{r}
+m$p.theta.recover.samples %>% mcmc() %>% plot()
+```
+
+##
+
+```{r}
+m$p.beta.recover.samples %>% mcmc() %>% plot()
+```
+
+## Predictions
+
+```{r echo=FALSE}
+library(maptools)
+data(wrld_simpl)
+
+r = raster(nrows=30, ncol=60,
+           xmn = min(csn$longitude)*1.05, xmx = max(csn$longitude)*0.95,
+           ymn = min(csn$latitude )*0.95, ymx = max(csn$latitude )*1.05)
+
+usa = rasterize(wrld_simpl[wrld_simpl$NAME == "United States",], r)
+
+cells = which(!is.na(usa[]))
+pred_coords = xyFromCell(r, cells)
+```
+
+```{r}
+m_pred = spPredict(m, pred_coords, pred.covars = matrix(1, nrow=nrow(pred_coords)), 
+                   start=n_samp/2+1, thin=(n_samp/2)/1000)
+m_pred_summary = post_summary(t(m_pred$p.y.predictive.samples))
+```
+
+## 
+
+```{r}
+splm_pm25_pred = r
+splm_pm25_pred[cells] = m_pred_summary$post_mean
+
+plot(splm_pm25_pred)
+points(coords, pch=16, cex=0.5)
+```
+
+
+
+## JAGs Model
+
+
+
+```{r echo=FALSE}
+gplm = "model{
+  for(i in 1:length(y)){
+    y[i] ~ dnorm(beta + w[i], tau)
+    mu_w[i] <- 0
+  }
+ 
+  for(i in 1:length(y)){
+    for(j in 1:length(y)){
+      Sigma_w[i,j] <- sigma2_w * exp(-phi * d[i,j])
+    }
+  }
+  Sigma_w_inv <- inverse(Sigma_w)
+  w ~ dmnorm(mu_w, Sigma_w_inv)
+
+  beta ~ dnorm(0, 1/1000)
+  sigma2_w ~ dgamma(2, 2)
+  sigma2 ~ dgamma(2, 2)
+  tau <- 1/sigma2
+  phi ~ dunif(3/14, 6)
+}"
+cat(gplm,"\n")
+```
+
+##
+
+```{r echo=FALSE}
+if (!file.exists("gplm.Rdata"))
+{
+  m = jags.model(
+    textConnection(gplm), 
+    data = list(
+      d = as.matrix(dist(coords)),
+      y = csn$pm25
+    ),
+    n.adapt=5000
+  )
+
+  update(m, n.iter=5000)#, progress.bar="none")
+  
+  gplm_coda = coda.samples(
+    m, variable.names=c("sigma2", "sigma2_w", "phi", "beta"),
+    n.iter=5000, thin=5
+  )
+  save(gplm_coda, m, file="gplm.Rdata")
+} else {
+  load("gplm.Rdata")
+}
+
+params1 = get_coda_parameter(gplm_coda,"beta|phi")
+params2 = get_coda_parameter(gplm_coda,"sigma")
+```
+
+```{r echo=FALSE}
+plot(params1)
+```
+
+##
+
+```{r echo=FALSE}
+plot(params2)
+```
+
+<!--
+## Comparing Model Results
+
+
+
+m$p.theta.recover.samples %>% mcmc() %>% plot()
+m$p.beta.recover.samples %>% mcmc() %>% plot()
+
+d = rbind(
+  cbind(model="JAGS", get_coda_parameter(gplm_coda,"beta|phi|sigma") %>% post_summary()),
+  cbind(model="spBayes", get_coda_parameter(nc_sar_coda,"beta|phi|sigma") %>% post_summary())
+) %>% 
+  select(model, param, value = post_mean, low = post_lower, upp = post_upper) %>%
+  rbind(data.frame(model="spautolm CAR", param = c("beta0","beta1","phi","sigma2"), 
+                   value=c(nc_car$fit$coefficients, nc_car$lambda, nc_car$fit$s2), low=NA, upp=NA)) %>%
+  rbind(data.frame(model="spautolm SAR", param = c("beta0","beta1","phi","sigma2"), 
+                   value=c(nc_sar$fit$coefficients, nc_sar$lambda, nc_sar$fit$s2), low=NA, upp=NA)) %>%
+  mutate(offset = as.integer(model))
+
+
+ggplot(d, aes(y=offset, x=value, color=model)) +
+  geom_point(size=2) +
+  geom_errorbarh(aes(xmin=low, xmax=upp), height=0, size=1) +
+  facet_wrap(~param, scales="free_x") +
+  theme(axis.title.y = element_blank(),
+        axis.text.y  = element_blank(),
+        axis.ticks.y = element_blank()) +
+  ylim(-1,6)
+```
+
+-->
+
+

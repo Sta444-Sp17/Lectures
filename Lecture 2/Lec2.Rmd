@@ -1,0 +1,543 @@
+
+---
+title: "Lecture 2" 
+subtitle: "Diagnostics and Model Evaluation"
+author: "Colin Rundel"
+date: "1/23/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    slide_level: 3
+    fig_height: 6
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE)
+
+library(magrittr)
+library(dplyr)
+library(modelr)
+```
+
+
+# From last time
+
+### Linear model and data
+
+```{r message=FALSE}
+library(rjags)
+library(dplyr)
+
+set.seed(01172017)
+n = 100
+beta = c(0.7,1.5,-2.2,0.1)
+eps = rnorm(n, mean=0, sd=1)
+
+X0 = rep(1, n)
+X1 = rt(n,df=5)
+X2 = rt(n,df=5)
+X3 = rt(n,df=5)
+
+X = cbind(X0, X1, X2, X3)
+Y = X %*% beta + eps
+d = data.frame(Y,X[,-1]) 
+```
+
+
+### Bayesian model
+
+```{r echo=FALSE}
+model = 
+"model{
+  # Likelihood
+  for(i in 1:length(Y)){
+    Y[i]   ~ dnorm(mu[i],tau2)
+    mu[i] <- beta[1] + beta[2]*X1[i] + beta[3]*X2[i] + beta[4]*X3[i]
+  }
+
+  # Prior for beta
+  for(j in 1:4){
+    beta[j] ~ dnorm(0,1/100)
+  }
+
+  # Prior for sigma / tau2
+  sigma ~ dunif(0, 100) 
+  tau2 <- 1/(sigma*sigma)
+}"
+cat(model,"\n")
+```
+
+```{r include=FALSE, message=FALSE}
+m = jags.model(
+        textConnection(model), 
+        data = list(Y=c(Y), X1=X1, X2=X2, X3=X3)
+       ) 
+update(m, n.iter=1000, progress.bar="none")
+samp = coda.samples(
+        m, variable.names=c("beta","sigma"), 
+        n.iter=5000, progress.bar="none"
+       )
+```
+
+###
+
+```{r message=FALSE, echo=FALSE, fig.height=6}
+library(tidyr)
+library(ggplot2)
+
+truth = data_frame("beta[1]"=0.7,"beta[2]"=1.5,"beta[3]"=-2.2,"beta[4]"=0.1, "sigma"=1) %>%
+  gather(parameter)
+
+lm_coef = lm(Y~., data=d) %>% {c(.$coefficients, sd(.$residuals))} %>%
+  setNames(unique(truth$parameter)) %>%
+  as.list() %>%
+  as_data_frame() %>%
+  gather(parameter)
+
+
+ 
+samp_df = as_data_frame(samp[[1]]) %>%
+  gather(parameter)
+  
+ggplot(samp_df, aes(value, col=parameter, fill=parameter)) +
+  geom_density(alpha=0.1) + 
+  facet_wrap(~parameter, nrow=2, scales="free") +
+  geom_vline(data=truth, aes(xintercept=value), size=1, col='red') +
+  geom_vline(data=lm_coef, aes(xintercept=value), size=1, col='black')
+```
+
+
+# Model Evaluation
+
+### Model assessment?
+
+If we think back to our first regression class, one common option is $R^2$ which gives us the variability in $Y$ explained by our model.
+
+Quick review:
+
+. . . 
+
+$$ \underset{\text{Total}}{\sum_{i}^n \left(Y_i - \bar{Y}\right)^2} = \underset{\text{Model}}{\sum_{i=1}^n \left(\hat{Y}_i - \bar{Y}\right)^2} + \underset{\text{Error }}{\sum_{i=1}^n \left(Y_i - \hat{Y}_i\right)^2} $$
+
+. . .
+
+$$ R^2 = \text{Corr}(\bm{Y}, \hat{\bm{Y}})^2 = \frac{\sum_{i=1}^n \left(\hat{Y}_i - \bar{Y}\right)^2}{\sum_{i=1}^n \left(Y_i - \bar{Y}\right)^2} = 1 - \frac{\sum_{i=1}^n \left(\hat{Y}_i - \hat{Y}_i\right)^2}{\sum_{i=1}^n \left(Y_i - \bar{Y}\right)^2}  $$
+
+
+### Bayesian $R^2$
+
+While we can collapse our posterior parameter distributions to a single value (using mean, median, etc.) before calculating $\hat{\bm{Y}}$ and then $R^2$, we don't need to.
+
+```{r}
+n_sim = 5000; n = 100
+Y_hat = matrix(NA, nrow=n_sim, ncol=n, dimnames=list(NULL, paste0("Yhat[",1:n,"]")))
+
+for(i in 1:n_sim)
+{
+  beta_post = samp[[1]][i,1:4]
+  sigma_post = samp[[1]][i,5]
+  
+  Y_hat[i,] = beta_post %*% t(X) + rnorm(n, sd = sigma_post)
+}
+
+Y_hat[1:5, 1:5]
+```
+
+### $\hat{\bm{Y}}$ - lm vs Bayesian lm
+
+```{r message=FALSE, echo=FALSE, fig.height=6}
+Y_hat_df = as_data_frame(Y_hat[,1:6]) %>% gather(parameter)
+
+Y_hat_lm = lm(Y~., data=d) %>% predict()
+Y_hat_lm_df = Y_hat_lm %>% 
+  as_data_frame() %>%
+  mutate(parameter = paste0("Yhat[",1:100,"]"), Y=Y) %>%
+  slice(1:6)
+
+ggplot(Y_hat_df, aes(value, col=parameter, fill=parameter)) +
+  geom_density(alpha=0.1) + 
+  facet_wrap(~parameter, nrow=2, scales="free") +
+  geom_vline(data=Y_hat_lm_df, aes(xintercept=value), size=1) + 
+  geom_vline(data=Y_hat_lm_df, aes(xintercept=Y), size=1, color="red")
+```
+
+### Posterior $R^2$
+
+For each posterior sample $s$ we can calculate $R^2_s = \text{Corr}(\bm{Y}, \hat{\bm{Y}}_s)^2$,
+
+```{r}
+R2_post = apply(Y_hat, 1, function(Y_hat_s) cor(Y, Y_hat_s)^2)
+
+summary(c(R2_post)) %>% t()
+
+summary(lm(Y~., data=d))$r.squared
+```
+
+```{r echo=FALSE, fig.height=4}
+ggplot(as_data_frame(R2_post), aes(value)) +
+  geom_density(color="blue", alpha=0.1, fill="blue") + 
+  geom_vline(xintercept=cor(Y_hat_lm, Y)^2, size=1)
+```
+
+### What if we collapsed first?
+
+```{r}
+Y_hat_post_mean = apply(Y_hat, 2, mean) 
+head(Y_hat_post_mean)
+
+Y_hat_post_med  = apply(Y_hat, 2, median) 
+head(Y_hat_post_med)
+
+cor(Y_hat_post_mean, Y)^2
+
+cor(Y_hat_post_med,  Y)^2
+
+summary(lm(Y~., data=d))$r.squared
+```
+
+### What went wrong?
+
+If our criteria is to maximize $R^2$, then nothing. Why this result?
+
+. . . 
+
+$~$
+
+Remember that $\hat{\beta}_{MLE} = \hat{\beta}_{LS}$, the latter of which is achieved by 
+
+$$ \underset{\bm{\beta}}{\argmin} \sum_{i=1}^n \left( Y_i - \bm{X}_{i\cdot} \bm{\beta} \right)^2  = \underset{\bm{\beta}}{\argmin} \sum_{i=1}^n \left( Y_i - \hat{Y}_i \right)^2$$
+
+. . .
+
+$~$
+
+So if we have $\bm\beta$ such that it minimizes the least squares criterion what does that tell us about
+
+$$ R^2 = \text{Corr}(\bm{Y}, \hat{\bm{Y}})^2 = \frac{\sum_{i=1}^n \left(\hat{Y}_i - \bar{Y}\right)^2}{\sum_{i=1}^n \left(Y_i - \bar{Y}\right)^2} = 1 - \frac{\sum_{i=1}^n \left(Y_i - \hat{Y}_i\right)^2}{\sum_{i=1}^n \left(Y_i - \bar{Y}\right)^2}  $$
+
+
+### Some problems with $R^2$
+
+\begin{itemize}
+\item $R^2$ always increases (or stays the same) when a predictor is added  \\ ~\\
+\item $R^2$ is highly susecptible to over fitting \\ ~\\
+\item $R^2$ is sensitive to outliers \\ ~\\
+\item $R^2$ depends heavily on current values of $Y$ \\ ~\\
+\item $R^2$ can differ drastically for two equivalent models (i.e. nearly identical inferences about key parameters)
+\end{itemize}
+
+
+# Other Metrics
+
+### Root Mean Square Error
+
+The traditional definition of rmse  is as follows
+
+$$ \text{RMSE} = \sqrt{ \frac{1}{n} \sum_{i=1}^n \left(Y_i - \hat{Y_i} \right)^2 } $$
+
+In the bayesian context where we have posterior samples from each parameter / prediction of interest we can express this equation as
+
+$$ \text{RMSE} = \sqrt{ \frac{1}{n \, n_s} \sum_{s=1}^{n_s} \sum_{i=1}^n \left(Y_i - \hat{Y}_{i,s} \right)^2 } $$
+$~$
+
+Note that as we just saw with $R^2$ using the first definition with $\hat{Y}_{i} = \sum_{s=1}^{n_s}\hat{Y}_{i,s} / n$ does not necessarily give the same result as the 2nd equation.
+
+
+### Continuous Rank Probability Score
+
+RMSE (and related metrics like MAE) are not directly applicable to probabilistic predictions since they require fixed values of $\hat{Y}_i$. We can generalize to a fully continuous case where $\hat{Y}$ is given by a predictive distribution using a Continuous Rank Probability Score
+
+$$ \text{CRPS} = \int_{-\infty}^\infty \left(F_{\hat{Y}}(z) - \bm{1}_{\{z \geq Y\}}\right)^2 dz $$
+
+where $F_{\hat{Y}}$ is the empirical CDF of $\hat{Y}$ (the posterior predictive distribution for $Y$) and $\bm{1}_{z \geq Y}$ is the indicator function which equals 1 when $z \geq Y$, the true/observed value of $Y$.
+
+
+### Accuracy vs. Precision
+
+```{r echo=FALSE, message=FALSE}
+d_crps = data_frame(
+  dist1 = rnorm(10000, sd=2)+0,
+  dist2 = rnorm(10000, sd=2)+2,
+  dist3 = rnorm(10000, sd=1)+0,
+  dist4 = rnorm(10000, sd=1)+2
+) %>% gather(dist)
+
+rmses = d_crps %>% group_by(dist) %>% summarise(rmse = (value-0)^2 %>% mean() %>% sqrt() %>% round(3))
+
+rmse_lookup = rmses$rmse %>% setNames(rmses$dist)
+rmse_labeler = function(variable, value)
+{
+  paste0(value, " (rmse = ", rmse_lookup[value],")")
+}
+
+suppressWarnings(
+ggplot(d_crps, aes(value, color=dist, fill=dist)) +
+  geom_density(alpha=0.1) +
+  facet_grid(~dist, labeller = rmse_labeler) + 
+  geom_vline(xintercept=0)
+)
+```
+
+### CDF vs Indicator
+
+```{r echo=FALSE}
+indicator = data.frame(value=seq(-10,10,len=1000)) %>% mutate(y = as.double(value >= 0))
+
+ggplot(d_crps, aes(value, color=dist)) +
+  geom_line(data=indicator, color="black", aes(y=y), size=1, alpha=0.5) +
+  stat_ecdf(size=1, alpha=0.5)
+  
+
+source("util/util-crps.R")
+
+crps = d_crps %>% group_by(dist) %>% summarise(crps = calc_crps(value, 0))
+crps$crps %>% setNames(crps$dist) %>% round(3)
+```
+
+
+### Empirical Coverage
+
+One final method of assessing model calibration is assessing how well credible intervals, derived from the posterior predictive distributions of the $Y$s, capture the true/observed values.
+
+. . . 
+
+```{r echo=FALSE, fig.height=4.5}
+cred_int = HPDinterval(as.mcmc(Y_hat),0.9)
+cred_int = data_frame(parameter = rownames(cred_int)) %>% 
+  cbind(cred_int, Y) %>%
+  mutate(capture = lower <= Y & upper >= Y)
+
+ggplot(cred_int %>% slice(1:50), aes(y=Y, x=1:50, color=capture)) +
+  xlab("index") +
+  geom_errorbar(aes(ymax=upper, ymin=lower), width=0, color='black', alpha=0.3, size=2) +
+  geom_point(size=5) 
+
+c("90% CI empirical coverage" = sum(cred_int$capture)/100)
+```
+
+
+# Cross-validation
+
+### Cross-validation styles
+
+Kaggle style:
+\begin{center}
+\includegraphics[width=0.8\textwidth]{figs/kaggle.png}
+\end{center}
+
+$k$-fold:
+\begin{center}
+\includegraphics[width=0.8\textwidth]{figs/k-fold.png}
+\end{center}
+
+
+### Cross-validation in R with \texttt{modelr}
+
+```{r}
+library(modelr)
+
+d_kaggle = resample_partition(d, c(train=0.70, test1=0.15, test2=0.15))
+d_kaggle
+
+d_kfold = crossv_kfold(d, k=5)
+d_kfold
+```
+
+### \texttt{resample} objects
+
+The simple idea behind \texttt{resample} objects is that there is no need to create and hold on to these subsets / partitions of the original data frame - only need to track which rows belong to what subset and then handle the creation of the new data frame when necessary.
+
+```{r}
+d_kaggle$test1
+
+str(d_kaggle$test1)
+
+as.data.frame(d_kaggle$test1)
+```
+
+### Simple usage
+
+```{r}
+lm_train = lm(Y~., data=d_kaggle$train)
+ 
+lm_train %>% summary() %$% r.squared
+
+rsquare(lm_train, d_kaggle$train)
+
+
+Y_hat_test1 = predict(lm_train, d_kaggle$test1)
+
+(Y_hat_test1 - as.data.frame(d_kaggle$test1)$Y)^2 %>% mean() %>% sqrt()
+
+rmse(lm_train, d_kaggle$test1)
+
+rmse(lm_train, d_kaggle$test2)
+```
+
+
+### Aside: \texttt{purrr}
+
+\texttt{purrr} is a package by Hadley which improves functional programming in R by focusing on pure and type stable functions.
+It provides basic functions for looping over objects and returning a value (of a specific type) - think of it as a better version of `lapply`/`sapply`/`vapply`.
+
+* `map()` - returns a list.
+
+* `map_lgl()` - returns a logical vector.
+
+* `map_int()` - returns a integer vector.
+
+* `map_dbl()` - returns a double vector.
+
+* `map_chr()` - returns a character vector.
+
+* `map_df()` - returns a data frame.
+
+* `map2_*` - variants for iterating over two vectors simultaneously.
+
+
+### Aside: Type Consistency
+
+R is a weakly / dynamically typed language which means there is no way to define a function which enforces the argument or return types.
+
+This flexibility can be useful at times, but often it makes it hard to reason about your code and requires more verbose code to handle edge cases.
+
+```{r error=TRUE}
+library(purrr)
+
+map_dbl(list(rnorm(1e3),rnorm(1e3),rnorm(1e3)), mean)
+map_chr(list(rnorm(1e3),rnorm(1e3),rnorm(1e3)), mean)
+map_int(list(rnorm(1e3),rnorm(1e3),rnorm(1e3)), mean)
+```
+
+### Aside: Anonymous Functions shortcut
+
+An anonymous function is one that is never given a name (i.e. assigned to a variable), using base R we would write something like the following,
+
+```{r}
+sapply(1:10, function(x) x^(x+1))
+```
+
+purrr lets us write anonymous functions using the traditional style, but also lets us use one sided formulas where the value being mapped is referenced by `.`
+
+```{r}
+map_dbl(1:10, function(x) x^(x+1))
+
+map_dbl(1:10, ~ .^(.+1))
+```
+
+
+### Cross-validation in R with \texttt{modelr} + \texttt{purrr}
+
+```{r message=FALSE}
+lm_models = map(d_kfold$train, ~ lm(Y~., data=.))
+str(lm_models, max.level = 1)
+
+map2_dbl(lm_models, d_kfold$train, rsquare)
+
+map2_dbl(lm_models, d_kfold$test, rmse)
+```
+
+
+### Getting \texttt{modelr} to play nice with \texttt{rjags}
+
+We used the following code to fit out model previously, lets generalize / functionalize it so we can use it with modelr
+
+
+```{r eval=FALSE}
+m = jags.model(
+        textConnection(model), 
+        data = list(Y=c(Y), X1=X1, X2=X2, X3=X3)
+       ) 
+update(m, n.iter=1000, progress.bar="none")
+samp = coda.samples(
+        m, variable.names=c("beta","sigma"), 
+        n.iter=5000, progress.bar="none"
+       )
+```
+
+### Fitting the model
+
+```{r}
+fit_jags_lm = function(data, n_burnin=1000, n_samps=5000)
+{
+  data = as.data.frame(data, optional=TRUE)
+
+  m = jags.model(textConnection(model), data = data, quiet=TRUE)
+  update(m, n.iter=n_burnin, progress.bar="none")
+  coda.samples(
+    m, variable.names=c("beta","sigma"), 
+    n.iter=n_samps, progress.bar="none"
+  )[[1]]
+}
+```
+
+
+### Predicting the model
+
+```{r}
+predict_jags_lm = function(samp, newdata)
+{
+  data = as.data.frame(newdata, optional=TRUE) %>% tbl_df()
+  
+  n = nrow(newdata)
+  beta0_post = samp[,1]; beta1_post = samp[,2]
+  beta2_post = samp[,3]; beta3_post = samp[,4]
+  sigma_post = samp[,5]
+  
+  data$post_pred = list(NA)
+  for(i in 1:n)
+  {
+    mu = beta0_post * 1          + beta1_post * data$X1[i] + 
+         beta2_post * data$X2[i] + beta3_post * data$X3[i] 
+    error = rnorm(n_sim, sd = sigma_post)
+    
+    data$post_pred[[i]] = mu + error
+  }
+  
+  data
+}
+```
+
+### Empirical Coverage
+
+```{r}
+empcov = function(pred, obs_col, width=0.9)
+{
+  cred_int = map(pred$post_pred, ~ HPDinterval(., width)) %>% 
+    do.call(rbind, .)
+  
+  observed = pred[[obs_col]]
+  
+  data = cbind(pred, cred_int) %>% 
+    tbl_df() %>%
+    mutate(capture = lower <= observed & upper >= observed)
+  
+  cat(width*100,"% CI empirical coverage = ", 
+      round(sum(data$capture)/nrow(data),3), "\n", sep="") 
+  
+  invisible(data)
+}
+```
+
+### Putting it together
+
+```{r message=FALSE}
+model_fit = fit_jags_lm(d_kaggle$train)
+train_pred = predict_jags_lm(model_fit, newdata = d_kaggle$train)
+test1_pred = predict_jags_lm(model_fit, newdata = d_kaggle$test1)
+test2_pred = predict_jags_lm(model_fit, newdata = d_kaggle$test2)
+
+empcov(train_pred, obs_col="Y", width=0.9)
+
+empcov(test1_pred, obs_col="Y", width=0.9)
+
+empcov(test2_pred, obs_col="Y", width=0.9)
+```
+

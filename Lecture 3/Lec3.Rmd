@@ -1,0 +1,628 @@
+
+---
+title: "Lecture 3" 
+subtitle: "Residual Analysis + Generalized Linear Models"
+author: "Colin Rundel"
+date: "1/23/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 6
+    fig_height: 3.5
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE)
+
+library(magrittr)
+library(dplyr)
+library(modelr)
+library(ggplot2)
+library(tidyr)
+library(rjags)
+library(stringr)
+library(gridExtra)
+
+theme_set(
+  theme_bw()  
+  #theme(plot.title = element_text(hjust = 0.5))
+)
+
+get_coda_parameter = function(coda, pattern)
+{
+  w = coda[[1]] %>% colnames() %>% str_detect(pattern)
+  coda[[1]][,w]
+}
+
+post_summary = function(m, ci_width=0.95)
+{
+  data_frame(
+    post_mean  = apply(m, 2, mean),
+    post_lower = apply(m, 2, quantile, probs=(1-ci_width)/2),
+    post_upper = apply(m, 2, quantile, probs=1 - (1-ci_width)/2)
+  )
+}
+
+```
+
+
+# Residual Analysis
+
+## Atmospheric $\text{CO}_2$ (ppm) from Mauna Loa
+
+```{r echo=FALSE}
+co2_df = data.frame(co2=as.matrix(co2), date=c(time(co2))) %>% 
+  tbl_df() %>%
+  mutate(
+    year = floor(date),
+    month = month.abb[(date %% 1)*12 + 1]
+  ) %>%
+  filter(year >= 1985)
+
+(
+  co2_base = ggplot(co2_df, aes(x=date, y=co2)) +
+  geom_line()
+)
+```
+
+
+## Where to start?
+
+Well, it looks like stuff is going up on average ...
+
+. . .
+
+```{r echo=FALSE}
+l = lm(co2~date, data=co2_df)
+co2_l = add_predictions(co2_df, l) %>% add_residuals(l)
+
+l_model = co2_base + geom_line(data=co2_l, aes(y=pred), col='red', alpha=0.5)
+l_resid = ggplot(co2_l, aes(x=date, y=resid)) + geom_point() + geom_line(color="grey",size=0.5,alpha=0.5)
+
+grid.arrange(l_model, l_resid, ncol=1)
+```
+
+## and then?
+
+Well there is some periodicity lets add the month ...
+
+. . . 
+
+```{r echo=FALSE}
+ls = lm(resid~month, data=co2_l)
+co2_ls = add_predictions(co2_l, ls, var = "pred2") %>% add_residuals(ls, var="resid2")
+
+ls_model = l_resid + geom_line(data=co2_ls, aes(y=pred2), col='red', alpha=0.5)
+ls_resid = ggplot(co2_ls, aes(x=date, y=resid2)) + geom_point() + geom_line(color="grey",size=0.5,alpha=0.5)
+
+grid.arrange(ls_model, ls_resid, ncol=1)
+```
+
+## and then and then?
+
+Maybe there is some different effect by year ...
+
+. . . 
+
+```{r echo=FALSE}
+lsy = lm(resid2~as.factor(year), data=co2_ls)
+co2_lsy = add_predictions(co2_ls, lsy, var = "pred3") %>% add_residuals(lsy, var="resid3")
+
+lsy_model = ls_resid + geom_line(data=co2_lsy, aes(y=pred3), col='red', alpha=0.5)
+lsy_resid = ggplot(co2_lsy, aes(x=date, y=resid3)) + geom_point() + geom_line(color="grey",size=0.5,alpha=0.5)
+
+grid.arrange(lsy_model, lsy_resid, ncol=1)
+```
+
+## Too much
+
+```{r}
+(lm = lm(co2~date + month + as.factor(year), data=co2_df))
+```
+
+## 
+
+```{r echo=FALSE, message=FALSE}
+d_lm = suppressWarnings( add_predictions(co2_df, lm) )
+
+co2_base + 
+  geom_line(data=d_lm, aes(y=pred), col='red', alpha=0.75)
+```
+
+
+
+# Generalized Linear Models
+
+## Background
+
+A generalized linear model has three key components:
+
+1. a probability distribution (from the exponential family) that describes your response variable
+
+2. a linear predictor $\bm{\eta} = \bm{X}\bm{\beta}$,
+
+3. and a link function $g$ such that $g(E(\bm{Y}|\bm{X})) = \bm{\mu} = \bm{\eta}$.
+
+
+
+
+# Poisson Regression
+
+## Model Specification
+
+A generalized linear model for count data where we assume the outcome variable follows a poisson distribution (mean = variance).
+
+$$
+\begin{aligned}
+Y_i &\sim \text{Poisson}(\lambda_i)\\
+ \log E(\bm{Y}|\bm{X}) &= \log{\bm{\lambda}} = \bm{X}\bm{\beta}
+\end{aligned}
+$$
+
+## Example - AIDS in Belgium
+
+```{r echo=FALSE}
+aids = data_frame(
+  year = 1981:1993,
+  cases = c(12, 14, 33, 50, 67, 74, 123, 141, 165, 204, 253, 246, 240) %>% as.integer()
+)
+
+aids_base = ggplot(aids, aes(x=year, y=cases)) + 
+  geom_point() +
+  labs(title="AIDS cases in Belgium")
+
+print(aids_base)
+```
+
+## Frequentist glm fit
+
+```{r}
+g = glm(cases~year, data=aids, family=poisson)
+pred = data_frame(year=seq(1981,1993,by=0.1))
+pred$cases = predict(g, newdata=pred, type = "response")
+```
+
+
+```{r echo=FALSE}
+aids_fit = aids_base + 
+  geom_line(data=pred, size=1.2, alpha=0.3)
+
+print(aids_fit)
+```
+
+## Residuals 
+
+Standard residuals:
+
+$$ r_i = Y_i - \hat{Y}_i = Y_i - \hat\lambda_i$$
+Pearson residuals:
+
+$$ r_i = \frac{Y_i - E(Y_i|X)}{\sqrt{Var(Y_i|X)}} = \frac{Y_i - \hat\lambda_i}{\sqrt{\hat\lambda_i}}$$
+
+Deviance residuals:
+
+$$ d_i = \text{sign}(y_i - \lambda_i) \sqrt{2(y_i \log (y_i/\hat\lambda_i) - (y_i-\hat\lambda_i))}$$
+
+
+```{r echo=FALSE}
+pois_standard_resid = function(y,l) y-l
+pois_pearson_resid  = function(y,l) (y-l) / sqrt(l)
+pois_deviance_resid = function(y,l) sign(y-l) * sqrt(2*(y*log(y/l)-(y-l)))
+```
+
+## Deviance and deviance residuals
+
+Deviance can be interpreted as the difference between your model's fit and the fit of an ideal model (where $E(\hat{Y}_i) = Y_i$).
+
+$$ D = 2(\mathcal{L}(Y|\theta_{best}) - \mathcal{L}(Y|\hat\theta)) = \sum_{i=1}^n {d_i}^2 $$
+
+Deviance is a measure of goodness of fit in a similar way to the residual sum of squares (which is just the sum of squared standard residuals). 
+
+## Deviance residuals derivation
+
+
+## Residual plots
+
+```{r echo=FALSE, out.width="\\textwidth"}
+lambda_hat = predict(g, type="response")
+aids_resid = cbind(
+  aids,
+  standard = pois_standard_resid(y=aids$cases, l=lambda_hat),
+  pearson  = pois_pearson_resid( y=aids$cases, l=lambda_hat),
+  deviance = pois_deviance_resid(y=aids$cases, l=lambda_hat)
+) %>% 
+  gather(type, residual, -year, -cases) %>%
+  mutate(type = factor(type, levels=c("standard","pearson","deviance")))
+
+ggplot(aids_resid, aes(x=year, y=residual, color=type)) +
+  geom_point() + 
+  geom_segment(aes(x=year, xend=year, y=0, yend=residual)) +
+  facet_wrap(~type, ncol=3, scale="free_y") + 
+  guides(color=FALSE)
+```
+
+##
+
+```{r}
+print(aids_fit)
+```
+
+## Quadratic fit
+
+```{r}
+g2 = glm(cases~year+I(year^2), data=aids, family=poisson)
+pred2 = data_frame(year=seq(1981,1993,by=0.1))
+pred2$cases = predict(g2, newdata=pred, type = "response")
+```
+
+
+```{r echo=FALSE}
+aids_base + 
+  geom_line(data=pred2, size=1.2, alpha=0.3)
+```
+
+## Quadratic fit - residuals
+
+```{r echo=FALSE}
+lambda_hat2 = predict(g2, type="response")
+aids_resid2 = cbind(
+  aids,
+  standard = pois_standard_resid(y=aids$cases, l=lambda_hat2),
+  pearson  = pois_pearson_resid( y=aids$cases, l=lambda_hat2),
+  deviance = pois_deviance_resid(y=aids$cases, l=lambda_hat2)
+) %>% 
+  gather(type, residual, -year, -cases) %>%
+  mutate(type = factor(type, levels=c("standard","pearson","deviance")))
+
+ggplot(aids_resid2, aes(x=year, y=residual, color=type)) +
+  geom_point() + 
+  geom_segment(aes(x=year, xend=year, y=0, yend=residual)) +
+  facet_wrap(~type, ncol=3, scale="free_y") + 
+  guides(color=FALSE)
+```
+
+## Bayesian Poisson Regression Model
+
+```{r echo=FALSE}
+poisson_model1 = 
+"model{
+  # Likelihood
+  for(i in 1:length(Y)){
+    Y[i] ~ dpois(lambda[i])
+    log(lambda[i]) <- beta[1] + beta[2]*X[i]
+    
+    # In-sample prediction
+    Y_hat[i] ~ dpois(lambda[i])
+  }
+
+  # Prior for beta
+  for(j in 1:2){
+    beta[j] ~ dnorm(0,1/100)
+  }
+}"
+
+cat(poisson_model1,"\n")
+```
+
+## Bayesian Model fit
+
+```{r}
+m = jags.model(
+  textConnection(poisson_model1), quiet = TRUE,
+  data = list(Y=aids$cases, X=aids$year)
+) 
+update(m, n.iter=1000, progress.bar="none")
+samp = coda.samples(
+  m, variable.names=c("beta","lambda","Y_hat"), 
+  n.iter=5000, progress.bar="none"
+)
+```
+
+## MCMC Diagnostics
+
+```{r echo=FALSE, fig.width=8, fig.height=5}
+betas = get_coda_parameter(samp, "beta")
+plot(betas)
+```
+
+## Model fit?
+
+```{r echo=FALSE}
+y_hat = get_coda_parameter(samp, "Y_hat")
+aids_bpred = cbind(
+  aids,
+  post_mean = apply(y_hat, 2, mean),
+  post_med = apply(y_hat, 2, median),
+  post_lower = apply(y_hat, 2, quantile, probs=0.025),
+  post_upper = apply(y_hat, 2, quantile, probs=0.975)
+)
+
+aids_fit +
+  geom_ribbon(data=aids_bpred, aes(ymin = post_lower, ymax = post_upper), fill='blue', alpha=0.3) +
+  geom_line(data=aids_bpred, aes(y = post_mean), color='red')
+```
+
+## What went wrong?
+
+. . . 
+
+```{r}
+summary(g)
+```
+
+##
+
+```{r}
+summary(glm(cases~I(year-1981), data=aids, family=poisson))
+```
+
+
+## Revising the model
+
+```{r echo=FALSE}
+poisson_model2 = 
+"model{
+  # Likelihood
+  for(i in 1:length(Y)){
+    Y[i] ~ dpois(lambda[i])
+    log(lambda[i]) <- beta[1] + beta[2]*(X[i] - 1981)
+    
+    # In-sample prediction
+    Y_hat[i] ~ dpois(lambda[i])
+  }
+
+  # Prior for beta
+  for(j in 1:2){
+    beta[j] ~ dnorm(0,1/100)
+  }
+}"
+
+cat(poisson_model2,"\n")
+```
+
+## MCMC Diagnostics
+
+```{r echo=FALSE, fig.width=8, fig.height=5}
+m = jags.model(
+  textConnection(poisson_model2), quiet = TRUE,
+  data = list(Y=aids$cases, X=aids$year)
+) 
+update(m, n.iter=1000, progress.bar="none")
+samp = coda.samples(
+  m, variable.names=c("beta","lambda","Y_hat"), 
+  n.iter=5000, progress.bar="none"
+)
+
+betas = get_coda_parameter(samp, "beta")
+plot(betas)
+```
+
+## Model fit
+
+```{r echo=FALSE}
+y_hat = get_coda_parameter(samp, "Y_hat")
+aids_bpred = cbind(
+  aids,
+  post_summary(y_hat)
+)
+
+aids_base +
+  geom_ribbon(data=aids_bpred, aes(ymin = post_lower, ymax = post_upper), fill='blue', alpha=0.3) +
+  geom_line(data=aids_bpred, aes(y = post_mean), color='red') +
+  labs(subtitle=labs(subtitle="(Linear Poisson Model)"))
+```
+
+## Bayesian Residual Plots
+
+```{r echo=FALSE, out.width="\\textwidth"}
+lambda = get_coda_parameter(samp, "lambda")
+
+standard = post_summary( apply(lambda, 1, pois_standard_resid, y=aids$cases) %>% t() )
+pearson  = post_summary( apply(lambda, 1, pois_pearson_resid , y=aids$cases) %>% t() )
+deviance = post_summary( apply(lambda, 1, pois_deviance_resid, y=aids$cases) %>% t() )
+
+aids_bresid = rbind(
+  cbind(aids, type="standard", standard),
+  cbind(aids, type="pearson",  pearson),
+  cbind(aids, type="deviance", deviance)
+)
+
+ggplot(aids_bresid, aes(x=year, y=post_mean, color=type)) +
+  geom_point() + 
+  geom_segment(aes(x=year, xend=year, y=post_lower, yend=post_upper)) +
+  facet_wrap(~type, ncol=3, scale="free_y") + 
+  guides(color=FALSE) + 
+  geom_point(data=aids_resid, aes(x=year, y=residual), color="black", alpha=0.2)
+```
+
+
+
+## Model fit
+
+```{r echo=FALSE}
+poisson_model_quad = 
+"model{
+  # Likelihood
+  for(i in 1:length(Y)){
+    Y[i] ~ dpois(lambda[i])
+    log(lambda[i]) <- beta[1] + beta[2]*(X[i] - 1981) + beta[3]*(X[i] - 1981)^2
+    
+    # In-sample prediction
+    Y_hat[i] ~ dpois(lambda[i])
+  }
+
+  # Prior for beta
+  for(j in 1:3){
+    beta[j] ~ dnorm(0,1/100)
+  }
+}"
+
+m_quad = jags.model(
+  textConnection(poisson_model_quad), quiet = TRUE,
+  data = list(Y=aids$cases, X=aids$year)
+) 
+update(m_quad, n.iter=1000, progress.bar="none")
+samp_quad = coda.samples(
+  m_quad, variable.names=c("beta","lambda","Y_hat"), 
+  n.iter=5000, progress.bar="none"
+)
+
+y_hat_quad = get_coda_parameter(samp_quad, "Y_hat")
+aids_bpred_quad = cbind(
+  aids,
+  post_summary(y_hat_quad)
+)
+
+aids_quad = aids_base +
+  geom_ribbon(data=aids_bpred_quad, aes(ymin = post_lower, ymax = post_upper), fill='blue', alpha=0.3) +
+  geom_line(data=aids_bpred_quad, aes(y = post_mean), color='red') +
+  labs(subtitle="(Quadratic Poisson Model)")
+
+print(aids_quad)
+```
+
+## Bayesian Residual Plots
+
+```{r echo=FALSE, out.width="\\textwidth"}
+lambda_quad = get_coda_parameter(samp_quad, "lambda")
+
+standard = post_summary( apply(lambda_quad, 1, pois_standard_resid, y=aids$cases) %>% t() )
+pearson  = post_summary( apply(lambda_quad, 1, pois_pearson_resid , y=aids$cases) %>% t() )
+deviance = post_summary( apply(lambda_quad, 1, pois_deviance_resid, y=aids$cases) %>% t() )
+
+aids_bresid_quad = rbind(
+  cbind(aids, type="standard", standard),
+  cbind(aids, type="pearson",  pearson),
+  cbind(aids, type="deviance", deviance)
+)
+
+ggplot(aids_bresid_quad, aes(x=year, y=post_mean, color=type)) +
+  geom_point() + 
+  geom_segment(aes(x=year, xend=year, y=post_lower, yend=post_upper)) +
+  facet_wrap(~type, ncol=3, scale="free_y") + 
+  guides(color=FALSE) + 
+  geom_point(data=aids_resid2, aes(x=year, y=residual), color="black", alpha=0.2)
+```
+
+# Negative Binomial Regression
+
+## Overdispersion
+
+One of the properties of the Poisson distribution is that if $X \sim \text{Pois}(\lambda)$ then $E(X) = Var(X) = \lambda$. 
+
+If we are constructing a model where we claim that our response variable $Y$ follows a Poisson distribution then we are making a very strong assumption which has implactions for both inference and prediction.
+
+. . . 
+
+```{r}
+mean(aids$cases)
+var(aids$cases)
+```
+
+## Negative binomial regession
+ 
+If we define
+
+$$
+\begin{aligned}
+Y_i|Z_i &\sim \text{Pois}(\lambda_i \; Z_i) \\
+Z_i &\sim \text{Gamma}(\theta_i, \, \theta_i)
+\end{aligned}
+$$
+
+then the marginal distribution of $Y_i$ will be negative binomial with,
+
+$$
+\begin{aligned}
+E(Y_i)   &= \lambda_i \\
+Var(Y_i) &= \lambda_i + \lambda_i^2/\theta_i
+\end{aligned}
+$$
+
+## Model 
+
+```{r echo=FALSE}
+negbin_model = 
+"model{
+  for(i in 1:length(Y))
+  {
+    Z[i] ~ dgamma(theta, theta)
+    log(lambda[i]) <- beta[1] + beta[2]*(X[i] - 1981) + beta[3]*(X[i] - 1981)^2
+
+    lambda_Z[i] <- Z[i]*lambda[i]
+
+    Y[i] ~ dpois(lambda_Z[i])
+    Y_hat[i] ~ dpois(lambda_Z[i])
+  }
+
+  for(j in 1:3){
+    beta[j] ~ dnorm(0, 1/100)
+  }
+
+  log_theta ~ dnorm(0, 1/100)
+  theta <- exp(log_theta)
+}"
+
+cat(negbin_model,"\n")
+```
+
+
+## Negative Binomial Model fit
+
+```{r echo=FALSE}
+m_nb = jags.model(
+  textConnection(negbin_model), quiet = TRUE,
+  data = list(Y=aids$cases, X=aids$year)
+) 
+update(m_nb, n.iter=1000, progress.bar="none")
+samp_nb = coda.samples(
+  m_nb, variable.names=c("beta","lambda","Y_hat","Z"), 
+  n.iter=5000, progress.bar="none"
+)
+
+y_hat_nb = get_coda_parameter(samp_nb, "Y_hat")
+aids_bpred_nb = cbind(
+  aids,
+  post_summary(y_hat_nb)
+)
+
+aids_nb = aids_base +
+  geom_ribbon(data=aids_bpred_nb, aes(ymin = post_lower, ymax = post_upper), fill='blue', alpha=0.3) +
+  geom_line(data=aids_bpred_nb, aes(y = post_mean), color='red') + 
+  labs(subtitle="(Quadratic Negative Binomial Model)")
+
+grid.arrange(aids_quad, aids_nb, ncol=2)
+x=get_coda_parameter(samp_nb, "Z")
+```
+
+## Bayesian Residual Plots
+
+```{r echo=FALSE, out.width="\\textwidth"}
+lambda_nb = get_coda_parameter(samp_nb, "lambda")
+
+standard = post_summary( apply(lambda_nb, 1, pois_standard_resid, y=aids$cases) %>% t() )
+pearson  = post_summary( apply(lambda_nb, 1, pois_pearson_resid , y=aids$cases) %>% t() )
+#deviance = post_summary( apply(y_hat_quad, 1, pois_deviance_resid, y=aids$cases) %>% t() )
+
+aids_bresid_nb = rbind(
+  cbind(aids, type="standard", standard),
+  cbind(aids, type="pearson",  pearson)
+  #cbind(aids, type="deviance", deviance)
+)
+
+ggplot(aids_bresid_nb, aes(x=year, y=post_mean, color=type)) +
+  geom_point() + 
+  geom_segment(aes(x=year, xend=year, y=post_lower, yend=post_upper)) +
+  facet_wrap(~type, ncol=3, scale="free_y") + 
+  guides(color=FALSE)
+```
+
+
+

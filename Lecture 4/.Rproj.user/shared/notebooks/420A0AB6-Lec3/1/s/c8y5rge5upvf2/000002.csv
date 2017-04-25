@@ -1,0 +1,3 @@
+"0","pois_standard_resid = function(y,l) y-l"
+"0","pois_pearson_resid  = function(y,l) (y-l) / sqrt(l)"
+"0","pois_deviance_resid = function(y,l) sign(y-l) * sqrt(2*(y*log(y/l)-(y-l)))"

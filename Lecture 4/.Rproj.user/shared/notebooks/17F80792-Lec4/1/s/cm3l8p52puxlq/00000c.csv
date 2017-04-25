@@ -1,0 +1,5 @@
+"0","d_g %>% "
+"0","  group_by(p_hat_bin) %>%"
+"0","  summarize(resid_mean = mean(resid), resid_sd = sd(resid)) %>%"
+"0","  ggplot(aes(x=p_hat_bin, y=resid_mean)) +"
+"0","    geom_point()"

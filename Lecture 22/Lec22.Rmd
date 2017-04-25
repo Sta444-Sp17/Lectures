@@ -1,0 +1,895 @@
+
+---
+title: "Lecture 22" 
+subtitle: "Computational Methods for GPs"
+author: "Colin Rundel"
+date: "04/12/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE)
+options(width=80)
+
+set.seed(20170412)
+
+library(magrittr)
+library(ggplot2)
+library(tidyr)
+library(rjags)
+library(gridExtra)
+library(purrr)
+library(forcats)
+library(fields)
+library(sf)
+library(raster)
+library(dplyr)
+library(readr)
+library(tibble)
+
+theme_set(
+  theme_bw()  
+)
+
+get_coda_parameter = function(coda, pattern)
+{
+  w = coda[[1]] %>% colnames() %>% str_detect(pattern)
+  coda[[1]][,w,drop=FALSE]
+}
+
+post_summary = function(m, ci_width=0.95)
+{
+  d = data_frame(
+    post_mean  = apply(m, 2, mean),
+    post_med   = apply(m, 2, median),
+    post_lower = apply(m, 2, quantile, probs=(1-ci_width)/2),
+    post_upper = apply(m, 2, quantile, probs=1 - (1-ci_width)/2)
+  )
+  
+  if (!is.null(colnames(m)))
+    d = d %>% mutate(param = colnames(m)) %>% dplyr::select(param,post_mean:post_upper)
+  
+  d
+}
+
+strip_attrs = function(obj)
+{
+  attributes(obj) = NULL
+  obj
+}
+
+strip_class = function(obj)
+{
+  attr(obj,"class") = NULL
+  obj
+}
+```
+
+
+# GPs and Computational Complexity
+
+
+## The problem with GPs
+
+Unless you are lucky (or clever), Gaussian process models are difficult to scale to large problems. For a Gaussian process $\bm{y} \sim \mathcal{N}(\bm{\mu},\bm{\Sigma})$:
+
+. . .
+
+\vspace{3mm}
+
+Want to sample $\bm{y}$?
+  \[ \bm{\mu} + \hlr{\text{Chol}(\bm{\Sigma})} \times \bm{Z} \text{ with } Z_i \sim \mathcal{N}(0,1) \qquad \qquad \color{redhl}{\mathcal{O}\left(n^3\right)} \]
+  
+. . .
+
+
+Evaluate the (log) likelihood? 
+  \[ -\frac{1}{2} \log \hlr{|\Sigma|} - \frac{1}{2} (\bm{x}-\bm{\mu})' \hlr{\bm{\Sigma}^{-1}} (\bm{x}-\bm{\mu}) - \frac{n}{2}\log 2\pi \qquad \qquad \color{redhl}{\mathcal{O}\left(n^3\right)}\]
+
+. . .
+
+Update covariance parameter?
+  \[ \hly{\{\Sigma\}_{ij}} = \sigma^2 \exp(-\{d\}_{ij}\phi) + \sigma^2_n \, 1_{i=j} \qquad \qquad \color{yellowhl}{\mathcal{O}\left(n^2\right)}\]
+
+
+
+## A simple guide to computational complexity
+
+\Large
+
+\begin{center}
+\vfill
+$\mathcal{O}\left(n\right)$ - Linear complexity \pause- Go for it \pause
+
+\vspace{15mm}
+
+$\mathcal{O}\left(n^2\right)$ - Quadratic complexity \pause- Pray \pause
+
+\vspace{15mm}
+
+$\mathcal{O}\left(n^3\right)$ - Cubic complexity \pause- Give up
+
+\vfill
+\end{center}
+
+
+
+## How bad is the problem?
+
+```{r echo=FALSE}
+decomp = read_csv("data/lapack.csv")
+
+ggplot(decomp, aes(y=cpu, x=n, color=method)) + 
+  geom_line() +
+  geom_point() +
+  ylab("time (secs)")
+```
+
+## Practice - Migratory Model Prediction
+
+After fitting the GP need to sample from the posterior predictive distribution at $\sim3000$ locations
+$$ \bm{y}_{p} \sim \mathcal{N}\left(\mu_p + \Sigma_{po} \Sigma_o^{-1}(y_o - \mu_o) ,~ \Sigma_p - \Sigma_{po} \Sigma_{o}^{-1} \Sigma_{op}\right) $$
+
+. . .
+
+\scriptsize  
+\begin{center}
+\renewcommand*{\arraystretch}{1.5}
+\begin{tabular}{rl|c|c|c}
+& Step                                    & CPU (secs)  & CPU+GPU (secs)  & Rel. Performance \\
+\hline
+1. & Calc. $\Sigma_p$, $\Sigma_{po}$      & 1.080       & 0.046           & 23.0 \\
+2. & Calc. $\text{chol}(\Sigma_p - \Sigma_{po} \Sigma_{o}^{-1} \Sigma_{op})$         
+                                          & 0.467       & 0.208           & 2.3 \\
+3. & Calc. $\mu_{p|o} + \text{chol}(\Sigma_{p|o}) \times Z$
+                                          & 0.049       & 0.052           & 0.9 \\
+4. & Calc. Allele Prob                    & 0.129       & 0.127           & 1.0 \\
+\hline 
+   & Total                                & 1.732       & 0.465           & 3.7 \\
+\end{tabular}
+\end{center}
+
+\vspace{3mm}
+
+\normalsize
+Total run time: CPU (28.9 min), CPU+GPU (7.8 min)
+
+
+## Cholesky CPU vs GPU (P100)
+
+```{r echo=FALSE}
+decomp %>%
+  gather(comp, time, cpu:gpu) %>%
+  ggplot(aes(y=time, x=n, color=method, linetype=comp)) + 
+    geom_line() +
+    geom_point() +
+  ylab("time (secs)")
+```
+
+##
+
+```{r echo=FALSE}
+decomp %>%
+  gather(comp, time, cpu:gpu) %>%
+  ggplot(aes(y=time, x=n, color=method, linetype=comp)) + 
+    geom_line() +
+    geom_point() +
+    ylab("time (secs)") +
+    scale_y_log10()
+```
+
+## Relative Performance
+
+```{r echo=FALSE}
+decomp %>%
+  ggplot(aes(y=cpu/gpu, x=n, color=method)) + 
+    geom_line() +
+    geom_point() +
+    ylab("Relative performance") +
+    scale_y_log10()
+```
+
+## Aside - Matrix Multiplication
+
+```{r echo=FALSE}
+mat_mult = read_csv("data/mat_mult.csv")
+
+mat_mult %>%
+  gather(comp, time, -n) %>%
+  ggplot(aes(x=n, y=time/1000, linetype=comp)) +
+    geom_line() +
+    geom_point() +
+    ylab("time (sec)") + 
+    labs(title="Matrix Multiplication")
+```
+
+
+## An even bigger hammer
+
+\small
+`bigGP` is an R package written by Chris Paciorek (UC Berkeley), et al.
+
+*  Specialized distributed implementation of linear algebra operation for GPs
+
+*  Designed to run on large super computer clusters
+
+*  Uses both shared and distributed memory
+
+*  Able to fit models on the order of $n = 65$k (32 GB Cov. matrix)
+
+\vspace{-3mm}
+
+\begin{center}
+\includegraphics[width=0.7\textwidth]{figs/Paciorek.pdf}
+\end{center}
+
+
+## More scalable solutions?
+
+\large
+
+* Spectral domain / basis functions
+
+\vspace{3mm}
+
+* Covariance tapering 
+
+\vspace{3mm}
+
+* GMRF approximations 
+
+\vspace{3mm}
+
+* Low-rank approximations
+
+\vspace{3mm}
+
+* Nearest-neighbor models
+
+
+
+
+# Low Rank Approximations
+
+## Low rank approximations in general
+
+Lets look at the example of the singular value decomposition of a matrix,
+
+$$ \underset{n \times m}{M} = \underset{n \times n}{U}\,\underset{n \times m}{\text{diag}(S)}\,\underset{m \times m}{V^{\,t}} $$
+where $U$ are called the left singular vectors, $V$ the right singular vectors, and $S$ the singular values. Usually the singular values and vectors are ordered such that the signular values are in descending order. 
+
+. . .
+
+It turns out (Eckart–Young theorem) that we can approximate $M$ as having rank $r$ by defining $\tilde S$ to only have the $r$ largest singular values (others set to zero).
+
+$$ 
+\begin{aligned}
+\underset{n \times m}{\tilde M} 
+  &= \underset{n \times n}{U}\,\underset{n \times m}{\text{diag}(\tilde S)}\,\underset{m \times m}{V^{\,t}} 
+  &= \underset{n \times k}{\tilde U}\,\underset{k \times k}{\text{diag}(\tilde S)}\,\underset{k \times m}{\tilde{V}^{\,t}} 
+\end{aligned}
+$$
+
+## Example
+
+```{r echo=FALSE, message=FALSE, eval=FALSE}
+library(xtable)
+
+print_mat = function(m)
+{
+  print(
+    xtable(m, digits=3), floating=FALSE, tabular.environment="pmatrix", 
+    hline.after=NULL, include.rownames=FALSE, include.colnames=FALSE
+  )  
+}
+
+hilbert = function(n) { i <- 1:n; 1 / outer(i - 1, i, "+") }
+M = hilbert(4)
+s = svd(M)
+D = diag(s$d)
+
+svd(M)
+
+print_mat(M)
+print_mat(s$u)
+print_mat(D)
+print_mat(t(s$v))
+
+D_tilde = D = diag(c(s$d[1:2],0,0))
+M_tilde = s$u %*% D_tilde %*% t(s$v)
+print_mat(M_tilde)
+```
+
+\footnotesize
+
+$$ \begin{aligned}
+M 
+&= \begin{pmatrix}
+  1.000 & 0.500 & 0.333 & 0.250 \\ 
+  0.500 & 0.333 & 0.250 & 0.200 \\ 
+  0.333 & 0.250 & 0.200 & 0.167 \\ 
+  0.250 & 0.200 & 0.167 & 0.143 \\ 
+\end{pmatrix} 
+  = U \, \text{diag}(S) \, V^{\,t} \\
+U = V &= \begin{pmatrix}
+  -0.79 & 0.58 & -0.18 & -0.03 \\ 
+  -0.45 & -0.37 & 0.74 & 0.33 \\ 
+  -0.32 & -0.51 & -0.10 & -0.79 \\ 
+  -0.25 & -0.51 & -0.64 & 0.51 \\ 
+  \end{pmatrix} \\
+S &= 
+\begin{pmatrix} 1.50 & 0.17  & 0.01 & 0.00 \end{pmatrix}
+\end{aligned} $$
+
+. . .
+
+\normalsize
+Rank 2 approximation:
+\footnotesize
+$$ \begin{aligned}
+\tilde M
+&= \begin{pmatrix}
+  -0.79 &  0.58 \\ 
+  -0.45 & -0.37 \\ 
+  -0.32 & -0.51 \\ 
+  -0.25 & -0.51 \\ 
+\end{pmatrix}
+\begin{pmatrix}
+  1.50 & 0.00 \\ 
+  0.00 & 0.17 \\ 
+\end{pmatrix}
+\begin{pmatrix}
+  -0.79 & -0.45 & -0.32 & -0.25 \\ 
+  0.58 & -0.37 & -0.51 & -0.51 \\ 
+\end{pmatrix} \\
+&= 
+\begin{pmatrix}
+  1.000 & 0.501 & 0.333 & 0.249 \\ 
+  0.501 & 0.330 & 0.251 & 0.203 \\ 
+  0.333 & 0.251 & 0.200 & 0.166 \\ 
+  0.249 & 0.203 & 0.166 & 0.140 \\ 
+\end{pmatrix}
+\end{aligned} $$
+
+
+
+## Approximation Error
+
+We can measure the error of the approximation using the Frobenius norm,
+$$ \lVert M-\tilde M\rVert_F = \left( \sum_{i=1}^m\sum_{j=1}^n (M_{ij}-\tilde M_{ij})^2\right)^{1/2} $$
+
+. . .
+
+\vspace{3mm}
+
+Strong dependence (large eff. range):
+
+\vspace{2mm}
+
+```{r echo=FALSE, fig.height=4}
+d = runif(2*50) %>% matrix(ncol=2) %>% dist() %>% as.matrix()
+cov = exp(-d * 3)
+svd_m = svd(cov)
+
+sing_values = svd_m$d
+
+
+
+res = data_frame(rank=50:0, frob=NA)
+
+for(i in 1:nrow(res))
+{
+  res$frob[i] = (cov - svd_m$u %*% diag(svd_m$d) %*% t(svd_m$v))^2 %>% sum() %>% sqrt()
+  svd_m$d[50-i+1] = 0
+}
+
+par(mfrow=c(1,2))
+plot(sing_values, type='b', xlab="", ylab="Singular Values", main="SVD")
+plot(res$rank, res$frob, type='b', xlab="Rank", ylab="Error (Frob. norm)", main="Low Rank SVD")
+```
+
+
+
+##
+
+Weak dependence (short eff. range):
+
+\vspace{2mm}
+
+```{r echo=FALSE, fig.height=4}
+d = runif(2*50) %>% matrix(ncol=2) %>% dist() %>% as.matrix()
+cov = exp(-d * 8)
+svd_m = svd(cov)
+
+sing_values = svd_m$d
+
+
+res = data_frame(rank=50:0, frob=NA)
+
+for(i in 1:nrow(res))
+{
+  res$frob[i] = (cov - svd_m$u %*% diag(svd_m$d) %*% t(svd_m$v))^2 %>% sum() %>% sqrt()
+  svd_m$d[50-i+1] = 0
+}
+
+par(mfrow=c(1,2))
+plot(sing_values, type='b', xlab="", ylab="Singular Values", main="SVD")
+plot(res$rank, res$frob, type='b', xlab="Rank", ylab="Error (Frob. norm)", main="Low Rank SVD")
+```
+
+## How does this help? (Sherman-Morrison-Woodbury) {.t}
+
+There is an immensely useful linear algebra identity, the Sherman-Morrison-*Woodbury* formula, for the inverse (and determinant) of a decomposed matrix,
+
+$$\begin{aligned}
+\underset{n \times m}{\tilde M}^{-1} 
+&= \left(\underset{n \times m}{A} + \underset{n \times k}{U} ~ \underset{k \times k}{S} ~ \underset{k \times m}{V^t}\right)^{-1} \\
+&= A^{-1} - A^{-1} U \left(S^{-1}+V^{\,t} A^{-1} U\right)^{-1}V^{\,t} A^{-1}.
+\end{aligned}$$
+
+. . .
+
+How does this help?
+
+* Imagine that $A = \text{diag}(A)$, then it is trivial to find $A^{-1}$.
+
+* $S^{-1}$ is $k \times k$ which is hopefully small, or even better $S = \text{diag}(S)$.
+
+* $\left(S^{-1}+V^{\,t} A^{-1} U\right)$ is $k \times k$ which is hopefully small.
+
+
+## Aside - Determinant
+
+Remember for any MVN distribution when evaluating the likelihood
+$$ -\frac{1}{2} \log {|\Sigma|} - \frac{1}{2} (\bm{x}-\bm{\mu})' {\bm{\Sigma}^{-1}} (\bm{x}-\bm{\mu}) - \frac{n}{2}\log 2\pi$$
+we need the inverse of $\Sigma$ as well as its *determinant*.
+
+. . .
+
+* For a full rank Cholesky decomposition we get the determinant for ``free''.
+
+\vspace{-3mm}
+
+$$|M| = |LL^t| = \prod_{i=1}^n \left(\text{diag}(L)_i\right)^2$$
+
+. . . 
+
+* For a low rank approximation the Sherman-Morrison-Woodbury / Determinant lemma gives us,
+
+\vspace{-3mm}
+
+$$\begin{aligned}
+\det(\tilde M) 
+  &= \det({A} + {U} {S} {V^t}) \\
+  &= \det(S^{-1} + V^t A^{-1} U) ~ \det(S) ~ \det(A)
+\end{aligned}$$
+
+
+
+## Low rank approximations for GPs {.t}
+
+For a standard spatial random effects model, 
+
+\[ y(\bm{s}) = x(\bm{s}) \, \bm{\beta} + w(\bm{s}) + \epsilon, \quad \epsilon \sim N(0,~\tau^2 I) \]
+\[ w(\bm{s}) \sim \mathcal{N}(0,~\bm{\Sigma}(\bm{s})), \quad \bm{\Sigma}(\bm{s},\bm{s}')=\sigma\,\rho(\bm{s},\bm{s}'|\theta) \]
+
+if we can replace $\bm{\Sigma}(\bm{s})$ with a low rank approximation of the form 
+
+* $\bm{\Sigma}(\bm{s}) \approx \bm{U}\,\bm{S}\,\bm{V}^t$ where 
+
+* $\bm{U}$ and $\bm{V}$ are $n \times k$, 
+
+* $\bm{S}$ is $k \times k$, and
+
+* $A = \tau^2 I$ or a similar diagonal matrix
+
+
+
+
+# Predictive Processes
+
+## Gaussian Predictive Processes
+
+\small
+
+For a rank $k$ approximation,
+
+*  Pick $k$ knot locations $\bm{s}^\star$
+
+*  Calculate knot covariance, $\bm{\Sigma}(\bm{s}^\star)$, and knot cross-covariance, $\bm{\Sigma}(\bm{s}, \bm{s}^\star)$
+
+*  Approximate full covariance using
+
+\vspace{-2mm}
+$$ \bm{\Sigma}(\bm{s}) \approx \underset{n \times k}{\bm{\Sigma}(\bm{s},\bm{s}^\star)} \, \underset{k \times k}{\bm{\Sigma}(\bm{s}^\star)^{-1}} \, \underset{k \times n}{\bm{\Sigma}(\bm{s}^\star,\bm{s})}. $$
+
+*  PPs systematically underestimates variance ($\sigma^2$) and inflate $\tau^2$, Modified predictive processs corrects this using 
+
+\vspace{-2mm}
+$$
+\begin{aligned}
+\bm{\Sigma}(\bm{s}) \approx &
+\bm{\Sigma}(\bm{s},\bm{s}^\star) \, \bm{\Sigma}(\bm{s}^\star)^{-1} \, \bm{\Sigma}(\bm{s}^\star,\bm{s}) \\
+&+ \text{diag}\Big(\bm{\Sigma}(\bm{s}) - \bm{\Sigma}(\bm{s},\bm{s}^\star) \, \bm{\Sigma}(\bm{s}^\star)^{-1} \, \bm{\Sigma}(\bm{s}^\star,\bm{s})\Big).
+\end{aligned}
+$$
+
+\vspace{4mm}
+
+\footnotesize
+\begin{center}
+Banerjee, Gelfand, Finley, Sang (2008) \quad Finley, Sang, Banerjee, Gelfand (2008)
+\end{center}
+
+
+## Example
+
+Below we have a surface generate from a squared exponential Gaussian Process where
+
+$$ \{\Sigma\}_{ij} = \sigma^2 \exp\left(-(\phi\,d)^2\right) + \tau^2 I $$
+$$ \sigma^2 = 1 \quad \phi=9 \quad \tau^2 = 0.1 $$
+
+```{r echo=FALSE}
+set.seed(20170412)
+
+library(raster)
+
+if(!file.exists("pp_data.Rdata"))
+{
+  n=4900
+  n_samp = 1000
+  
+  r = raster(xmn=0, xmx=1, ymn=0, ymx=1, nrow=sqrt(n), ncol=sqrt(n))
+  
+  coords = xyFromCell(r, 1:length(r))
+  
+  cov_func = function(d) exp(-(9*d)^2) + ifelse(d==0, 0.1, 0) 
+  Sigma = coords %>% dist() %>% as.matrix() %>% cov_func()
+  
+  r[] = t(chol(Sigma)) %*% rnorm(n)
+  
+  obs_coords = runif(2*n_samp) %>% matrix(ncol=2)
+  
+  Sigma_2 = obs_coords %>% rdist() %>% cov_func()
+  Sigma_21 = rdist(obs_coords, coords) %>% cov_func()
+  
+  obs = Sigma_21 %*% solve(Sigma) %*% r[] + t(chol(Sigma_2 - Sigma_21 %*% solve(Sigma, t(Sigma_21)))) %*% rnorm(n_samp)
+  
+  
+  d = data_frame(z=c(obs), x=obs_coords[,1], y=obs_coords[,2])
+  
+  r_obs = r
+  r_obs[] = NA
+  r_obs[cellFromXY(r_obs, d[,c("x","y")] %>% as.matrix())] = d$z
+
+  save(d, r, coords, r_obs, cov_func, n, n_samp, file = "pp_data.Rdata")
+} else {
+  load("pp_data.Rdata")
+}
+```
+
+```{r echo=FALSE, fig.height=4.5}
+par(mfrow=c(1,2))
+plot(r)
+plot(r_obs)
+```
+
+## Predictive Process Model Results
+
+```{r echo=FALSE}
+library(spBayes)
+
+if (!file.exists("pp_models.Rdata"))
+{
+  n.samples = 20000
+  starting = list("phi"=3/0.3, "sigma.sq"=1, "tau.sq"=0.1)
+
+  tuning = list("phi"=0.1, "sigma.sq"=0.1, "tau.sq"=0.1)
+  
+  priors = list("beta.Norm"=list(0, 100),
+                  "phi.Unif"=c(3/1, 3/0.1), 
+                  "sigma.sq.IG"=c(2, 2),
+                  "tau.sq.IG"=c(2, 2))
+
+  cov.model = "gaussian"
+
+  m = spLM(z~1, data=d, coords=d[,c("x","y")] %>% as.matrix(), starting=starting,
+           tuning=tuning, priors=priors, cov.model=cov.model,
+           n.samples=n.samples, verbose=TRUE, n.report=n.samples/2+1)
+
+  pp_5 = spLM(z~1, data=d, coords=d[,c("x","y")] %>% as.matrix(), 
+              knots=c(5,5,0.1), modified.pp = FALSE,
+              starting=starting, tuning=tuning, priors=priors, cov.model=cov.model,
+              n.samples=n.samples, verbose=FALSE, n.report=n.samples/2+1)
+  pp_10 = spLM(z~1, data=d, coords=d[,c("x","y")] %>% as.matrix(), 
+               knots=c(10,10,0.05), modified.pp = FALSE,
+               starting=starting, tuning=tuning, priors=priors, cov.model=cov.model,
+               n.samples=n.samples, verbose=FALSE, n.report=n.samples/2+1)
+  pp_15 = spLM(z~1, data=d, coords=d[,c("x","y")] %>% as.matrix(), 
+               knots=c(15,15,0.05), modified.pp = FALSE,
+               starting=starting, tuning=tuning, priors=priors, cov.model=cov.model,
+               n.samples=n.samples, verbose=FALSE, n.report=n.samples/2+1)
+  
+  mpp_5 = spLM(z~1, data=d, coords=d[,c("x","y")] %>% as.matrix(), 
+              knots=c(5,5,0.1), modified.pp = TRUE,
+              starting=starting, tuning=tuning, priors=priors, cov.model=cov.model,
+              n.samples=n.samples, verbose=FALSE, n.report=n.samples/2+1)
+  mpp_10 = spLM(z~1, data=d, coords=d[,c("x","y")] %>% as.matrix(), 
+               knots=c(10,10,0.05), modified.pp = TRUE,
+               starting=starting, tuning=tuning, priors=priors, cov.model=cov.model,
+               n.samples=n.samples, verbose=FALSE, n.report=n.samples/2+1)
+  mpp_15 = spLM(z~1, data=d, coords=d[,c("x","y")] %>% as.matrix(), 
+               knots=c(15,15,0.05), modified.pp = TRUE,
+               starting=starting, tuning=tuning, priors=priors, cov.model=cov.model,
+               n.samples=n.samples, verbose=FALSE, n.report=n.samples/2+1)
+  
+  models = list(m=m, pp_5=pp_5, pp_10=pp_10, pp_15=pp_15, mpp_5=mpp_5, mpp_10=mpp_10, mpp_15=mpp_15)
+  
+  save(models, file="pp_models.Rdata")
+} else {
+  load("pp_models.Rdata")
+}
+```
+
+```{r echo=FALSE}
+if (!file.exists("pp_predict.Rdata"))
+{
+  predictions = lapply(
+    models,
+    function(m)
+    {
+      pred = spPredict(m, coords, matrix(1, nrow=nrow(coords)), start = 10001, thin=100, n.report=10)
+      rast = r
+      rast[] = pred$p.y.predictive.samples %>% t() %>% post_summary() %>% .$post_mean
+      rast
+    }
+  ) %>% setNames(names(models)) 
+  
+  save(predictions, file="pp_predict.Rdata")
+} else {
+  load("pp_predict.Rdata")
+}
+```
+
+```{r echo=FALSE}
+par(mfrow=c(2,4))
+
+plot(r, main="True Field")
+
+plot(predictions$pp_5,  main="PP - 5 x 5 knots")
+plot(predictions$pp_10, main="PP - 10 x 10 knots")
+plot(predictions$pp_15, main="PP - 15 x 15 knots")
+
+plot(predictions$m, main="Full GP")
+
+plot(predictions$mpp_5,  main="Mod. PP - 5 x 5 knots")
+plot(predictions$mpp_10, main="Mod. PP - 10 x 10 knots")
+plot(predictions$mpp_15, main="Mod. PP - 15 x 15 knots")
+```
+
+## Performance
+
+```{r echo=FALSE}
+res = data_frame(
+  time = map_dbl(models, ~ .$run.time[3]),
+  error = map_dbl(predictions, ~ (.[] - r[])^2 %>% sum() %>% sqrt()),
+  model = c("Full GP", "PP", "PP","PP", "Mod. PP", "Mod. PP", "Mod. PP") %>% as_factor(),
+  knots = c("-",25, 100, 225,25, 100, 225) %>% as_factor()
+)
+
+ggplot(res, aes(x=time, y=error, color=knots, shape=model)) +
+  geom_point(size=3)
+
+```
+
+## Parameter Estimates
+
+```{r echo=FALSE, fig.height=3}
+post_mean = purrr::map(models, ~ .$p.theta.samples %>% post_summary() %>% select(param, post_mean) %>% deframe()) %>% 
+  transpose() %>% 
+  simplify_all() %>% 
+  bind_cols() %>% 
+  cbind(model=names(models),.) %>%
+  mutate(model = as.character(model)) %>%
+  rbind(list("true",1,0.1,9)) %>%
+  mutate(
+    model = c("Full GP", "PP", "PP","PP", "Mod. PP", "Mod. PP", "Mod. PP","True") %>% as_factor(),
+    knots = c("-",25, 100, 225,25, 100, 225,"-") %>% as_factor()
+  ) %>%
+  gather(param, value, -model, -knots)
+
+ggplot(post_mean, aes(x=value, y=as.integer(as_factor(model)), col=knots, shape=model)) +
+  geom_point(size=3) +
+  facet_wrap(~param, scale="free_x") +
+  labs(x="Parameter Value", y="") +
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+```
+
+
+# Random Projections
+
+## Low Rank Approximations via Random Projections
+
+1.  Starting with an $m \times n$ matrix $\bm{A}$.
+
+2.  Draw an $n \times k+p$ Gaussian random matrix $\bm{\Omega}$.
+
+3.  Form $\bm{Y} = \bm{A}\,\bm{\Omega}$ and compute its QR factorization $\bm{Y} = \bm{Q}\,\bm{R}$
+
+<!--
+%*  For $j=1,2,\ldots,q$ where q is integer power
+%   Form Y􏱷 = AT Q and compute its QR factorization Y􏱷 = Q􏱷 R􏱷 j j−1 j jj
+%   Form Yj = AQ􏱷j and compute its QR factorization Yj = Qj Rj
+%   End
+%*  $Q = Q_q$
+-->
+
+4.  Form the $k+p \times n$ matrix $\bm{B}=\bm{Q}'\,\bm{A}$.
+
+5.  Compute the SVD of the small matrix $\bm{B}$, $\bm{B} = \bm{\hat{U}}\,\bm{S}\,\bm{V}'$.
+
+6.  Form the matrix $\bm{U} = \bm{Q} \, \bm{\hat{U}}$.
+
+\vspace{2mm}
+
+Resulting approximation has a bounded expected error,
+
+\[ \text{E } \, \| \bm{A} - \bm{U}\bm{S}\bm{V}'\| \leq \left[1 + \frac{4\sqrt{k+p}}{p-1} \sqrt{\min(m,n)} \right] \sigma_{k+1}. \]
+
+\vvfill
+
+\footnotesize
+\begin{center}
+Halko, Martinsson, Tropp (2011)
+\end{center}
+
+
+
+
+
+
+
+## Random Matrix Low Rank Approximations and GPs
+
+Preceeding algorithm can be modified slightly to take advantage of the positive definite structure of a covariance matrix.
+
+1.  Starting with an $n \times n$ covariance matrix $\bm{A}$.
+
+2.  Draw an $n \times k+p$ Gaussian random matrix $\bm{\Omega}$.
+
+3.  Form $\bm{Y} = \bm{A}\,\bm{\Omega}$ and compute its QR factorization $\bm{Y} = \bm{Q}\,\bm{R}$
+
+4.  Form the $k+p \times k+p$ matrix $\bm{B}=\bm{Q}'\,\bm{A} \, \bm{Q}$.
+
+5.  Compute the eigen decomposition of the small matrix $\bm{B}$, $\bm{B} = \bm{\hat{U}}\,\bm{S}\,\bm{\hat{U}}'$.
+
+6.  Form the matrix $\bm{U} = \bm{Q} \, \bm{\hat{U}}$.
+
+
+Once again we have a bound on the error,
+
+\[
+   \text{E } \| \bm{A} - \bm{Q}(\bm{Q}'\bm{A}\bm{Q})\bm{Q}'\| 
+ = \text{E } \| \bm{A} - \bm{U}\bm{S}\bm{U}'\| 
+\lessapprox c \cdot \sigma_{k+1}. 
+\]
+
+\vvfill
+
+\footnotesize
+\begin{center}
+Halko, Martinsson, Tropp (2011), Banerjee, Dunson, Tokdar (2012)
+\end{center}
+
+
+
+
+
+
+
+
+## Low Rank Approximations and GPUs
+
+Both predictive process and random matrix low rank approximations are good candidates for acceleration using GPUs.
+
+\vspace{3mm}
+
+* Both use Sherman-Woodbury-Morrison to calculate the inverse (involves matrix multiplication, addition, and a small matrix inverse).
+
+\vspace{3mm}
+
+* Predictive processes involves several covariance matrix calculations (knots and cross-covariance) and a small matrix inverse.
+
+\vspace{3mm}
+
+* Random matrix low rank approximations involves a large matrix multiplication ($\bm{A}\,\bm{\Omega}$) and several small matrix decompositions (QR, eigen).
+
+
+
+
+## Comparison ($n=15,000$, $k=\{100,\ldots,4900\}$)
+
+```{r fig.height=4, echo=FALSE}
+load("data/res3.Rdata")
+strong_cpu = res$time[res$method=="cpu"]
+strong_gpu = res$time[res$method=="gpu"] 
+strong = res %>%
+  filter(!method %in% c("cpu","gpu")) %>%
+  filter(!method %in% c("lr2", "lr2 mod", "lr3", "lr3 mod"))
+
+load("data/res12.Rdata")
+weak_cpu = res$time[res$method=="cpu"]
+weak_gpu = res$time[res$method=="gpu"] 
+weak = res %>%
+  filter(!method %in% c("cpu","gpu")) %>%
+  filter(!method %in% c("lr2", "lr2 mod", "lr3", "lr3 mod"))
+
+grid.arrange(
+  ggplot(strong, aes(x=time, y=error, color=method)) +
+    geom_line() +
+    geom_point() + 
+    geom_vline(xintercept = strong_cpu, color="red") +
+    geom_vline(xintercept = strong_gpu, color="orange") + 
+    labs(title="Strong Dependence"),
+  ggplot(weak, aes(x=time, y=error, color=method)) +
+    geom_line() +
+    geom_point() + 
+    geom_vline(xintercept = weak_cpu, color="red") +
+    geom_vline(xintercept = weak_gpu, color="orange") + 
+    labs(title="Weak Dependence"),
+  ncol=2
+)
+```
+
+## Rand. Projection LR Decompositions for Prediction {.t}
+
+\small
+
+This approach can also be used for prediction, if we want to sample 
+
+$$\bm{y} \sim \mathcal{N}(0,\bm{\Sigma})$$
+$$
+\Sigma \approx \bm{U} \bm{S} \bm{U}^t = (\bm{U} \bm{S}^{1/2} \bm{U}^t)(\bm{U} \bm{S}^{1/2} \bm{U}^t)^t 
+$$
+
+then 
+
+$$
+y_{\text{pred}} = (\bm{U}\, \bm{S}^{1/2}\,\bm{U}^t) \times \bm{Z} \text{ where } Z_i \sim \mathcal{N}(0,1)
+$$
+
+because $\bm{U}^t \, \bm{U} = I$ since $\bm{U}$ is an orthogonal matrix.
+
+\vvfill
+
+\begin{center}
+\footnotesize
+Dehdari, Deutsch (2012)
+\end{center}
+
+
+
+
+
+##
+
+\vspace{5mm}
+
+\begin{center}
+\includegraphics[width=\textwidth]{figs/RandLRPred.png}
+\end{center}
+$$ n=1000, \quad p=10000 $$
+

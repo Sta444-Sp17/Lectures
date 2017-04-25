@@ -1,0 +1,471 @@
+
+---
+title: "Lecture 9" 
+subtitle: "ARIMA Models"
+author: "Colin Rundel"
+date: "02/15/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 6
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE)
+options(width=110)
+
+set.seed(20170215)
+
+library(magrittr)
+library(dplyr)
+library(modelr)
+library(ggplot2)
+library(tidyr)
+library(rjags)
+library(stringr)
+library(gridExtra)
+library(readr)
+library(purrr)
+library(forcats)
+
+theme_set(
+  theme_bw()  
+)
+
+get_coda_parameter = function(coda, pattern)
+{
+  w = coda[[1]] %>% colnames() %>% str_detect(pattern)
+  coda[[1]][,w,drop=FALSE]
+}
+
+post_summary = function(m, ci_width=0.95)
+{
+  data_frame(
+    post_mean  = apply(m, 2, mean),
+    post_lower = apply(m, 2, quantile, probs=(1-ci_width)/2),
+    post_upper = apply(m, 2, quantile, probs=1 - (1-ci_width)/2)
+  )
+}
+
+strip_attrs = function(obj)
+{
+  attributes(obj) = NULL
+  obj
+}
+
+strip_class = function(obj)
+{
+  attr(obj,"class") = NULL
+  obj
+}
+```
+
+# $MA(\infty)$
+
+## $MA(q)$ {.t}
+
+From last time,
+$$ MA(q): \qquad y_t = \delta + w_t + \theta_1 \, w_{t-1} + \theta_2 \, w_{t-2} + \cdots + \theta_q \, w_{t-q} $$
+
+Properties:
+$$
+\begin{aligned}
+E(y_t) &= \delta \\
+\\
+Var(y_t) &= (1 + \theta_1^2 + \theta_2 + \cdots + \theta_q^2) \, \sigma_w^2 \\
+\\
+Cov(y_t, y_{t+h}) &= 
+\begin{cases}
+\theta_h + \theta_1 \, \theta_{1+h} + \theta_2 \, \theta_{2+h} + \cdots + \theta_{q-h}\, \theta_{q} & \text{if $|h| \leq q$}\\
+0 & \text{if $|h| > q$}
+\end{cases}\\
+\end{aligned}
+$$
+
+and is stationary for any values of $\theta_i$
+
+
+## $MA(\infty)$ {.t}
+
+If we let $q \to \infty$ then process will still be stationary if the moving average coefficients ($\theta$
+'s) are square summable,
+
+$$ \sum_{i=1}^\infty \theta_i^2 < \infty $$
+
+since this is necessary for $Var(y_t) < \infty$.
+
+$~$
+
+Sometimes, a slightly strong condition called absolute summability, $\sum_{i=1}^\infty |\theta_i| < \infty$, is  necessary (e.g. for some CLT related asymptotic results) . 
+
+
+## Invertibility {.t}
+
+If a $MA(q)$ process, $y_t = \delta + \theta_q(L) w_t$, can be rewritten as a purely $AR$ process then it is said that the MA process is invertible.
+
+$MA(1)$ w/ $\delta=0$ example:
+
+<!--
+$$
+\begin{aligned}
+y_t &= w_t + \theta \, w_{t-1} \\
+w_t &= y_t - \theta \, w_{t-1} \\
+\\
+w_t &= y_t - \theta \, w_{t-1} \\
+    &= y_t - \theta \, (y_{t-1} - \theta \, w_{t-2}) = y_t - \theta \, y_{t-1} + \theta^2 w_{t-2} \\
+    &= y_t - \theta \, y_{t-1} + \theta^2 (y_{t-2} - \theta w_{t-3}) = y_t - \theta \, y_{t-1} + \theta^2 y_{t-2} - \theta^3 w_{t-3} \\
+    &~~\vdots \\
+    &= y_t + \sum_{i=1}^p(-\theta)^i \, y_{t-i} + (-\theta)^{p+1} w_{t-p+1} \\
+\text{Therefore invertible if $|\theta| < 1$}
+\end{aligned}
+$$
+-->
+
+## Invertibility vs Stationarity {.t}
+
+A $MA(q)$ process is *invertible* if $y_t = \delta + \theta_q(L) \, w_t$ can be rewritten as an exclusively $AR$ process (of possibly infinite order), i.e. $\phi(L) \, y_t = \alpha + w_t$.  
+
+$~$  
+
+. . . 
+ 
+Conversely, an $AR(p)$ process is *stationary* if $\phi_p(L) \, y_t = \delta + w_t$ can be rewritten as an exclusively $MA$ process (of possibly infinite order), i.e. $y_t = \delta + \theta(L) \, w_t$.
+
+$~$
+
+. . . 
+
+So using our results w.r.t. $\phi(L)$ it follows that if all of the roots of $\theta_q(L)$ are outside the complex unit circle then the moving average is invertible.
+
+# Differencing
+
+## Difference operator
+
+We will need to define one more notational tool for indicating differencing
+$$ \Delta y_t = y_t - y_{t-1} $$
+
+just like the lag operator we will indicate repeated applications of this operator using exponents
+$$ 
+\begin{aligned}
+\Delta^2 y_t 
+  &= \Delta (\Delta y_t) \\
+  &= (\Delta y_t) - (\Delta y_{t-1}) \\
+  &= (y_t - y_{t-1}) - (y_{t-1} - y_{t-2}) \\
+  &= y_t - 2y_{t-1}+y_{t-2}
+\end{aligned}
+$$
+
+$\Delta$ can also be expressed in terms of the lag operator $L$,
+$$ \Delta^d = (1-L)^d $$
+
+
+## Differencing and Stocastic Trend {.t}
+
+Using the two component time series model
+$$ y_t = \mu_t + x_t $$
+where $\mu_t$ is a non-stationary trend component and $x_t$ is a mean zero stationary component. 
+
+$~$
+
+We have already shown that differencing can address deterministic trend (e.g. $\mu_t = \beta_0+\beta_1 \, t$). In fact, if $\mu_t$ is any $k$-th order polynomial of $t$ then $\Delta^k y_t$ is stationary.
+
+$~$
+
+Differencing can also address stochastic trend such as in the case where $\mu_t$ follows a random walk.
+
+
+## Stochastic trend - Example 1 {.t}
+
+Let $y_t = \mu_t + w_t$ where $w_t$ is white noise and $\mu_t = \mu_{t-1} + v_t$ with $v_t$ stationary as well. Is $\Delta y_t$ stationary?
+
+<!--
+$$
+\begin{aligned}
+\Delta y_t 
+  &= (\mu_t + w_t) - (\mu_{t-1} + w_{t-1}) \\
+  &= \mu_{t-1} + v_t - \mu_{t-1} + w_{t} + w_{t-1} \\
+  &= v_t + \Delta w_{t}
+\end{aligned}
+$$
+-->
+
+## Stochastic trend - Example 2 {.t}
+
+Let $y_t = \mu_t + w_t$ where $w_t$ is white noise and $\mu_t = \mu_{t-1} + v_t$ but now $v_t = v_{t-1} + e_t$ with $e_t$ being stationary. Is $\Delta y_t$ stationary? What about $\Delta^2 y_t$, is it stationary?
+
+<!--
+$$
+\begin{aligned}
+\Delta y_t 
+  &= (\mu_t + w_t) - (\mu_{t-1} + w_{t-1}) \\
+  &= \mu_{t-1} + v_t - \mu_{t-1} + w_{t} + w_{t-1} \\
+  &= v_t + \Delta w_{t} \\
+\\
+\Delta^2 y_t 
+  &= (v_t + \Delta w_{t}) - (v_{t-1} + \Delta w_{t-1}) \\
+  &= v_{t-1} + e_t + \Delta w_{t} - v_{t-1} - \Delta w_{t-1} \\
+  &= e_t + \Delta^2 w_t
+\end{aligned}
+$$
+-->
+
+# $ARIMA$
+
+## $ARIMA$ Models
+
+Autoregressive integrated moving average are just an extension of an $ARMA$ model to include differencing of degree $d$ to $y_t$ before include the autoregressive and moving average components.
+
+$$
+\begin{aligned}
+ARIMA(p,d,q): \qquad \phi_p(L) \; \Delta^d \, y_t &= \delta + \theta_q(L) w_t  
+\end{aligned}
+$$
+
+. . .
+
+$~$
+
+Box-Jenkins approach:
+
+1. Transform data if necessary to stabilize variance
+
+2. Choose order ($p$, $d$, $q$) of ARIMA model
+
+3. Estimate model parameters ($\detla$, $\phi$s, and $\theta$s)
+
+4. Diagnostics
+
+
+## Using `forecast` - random walk with drift
+
+Some of R's base timeseries handling is a bit wonky, the `forecast` package offers some useful alternatives and additional functionality.
+
+```{r}
+rwd = arima.sim(n=500, model=list(order=c(0,1,0)), mean=0.1) 
+
+library(forecast)
+Arima(rwd, order = c(0,1,0), include.constant = TRUE)
+```
+
+## EDA
+
+```{r echo=FALSE, fig.height=5}
+par(mfrow=c(2,2), mar=c(2,4,2,2))
+plot(rwd)
+plot(diff(rwd))
+Acf(rwd, main="")
+Acf(diff(rwd), main="")
+```
+
+## Over differencing
+
+```{r echo=FALSE, fig.height=5}
+par(mfrow=c(2,2), mar=c(2,4,2,2))
+plot(diff(rwd,2))
+Acf(diff(rwd,2), main="")
+plot(diff(rwd,3))
+Acf(diff(rwd,3), main="")
+```
+
+## AR or MA?
+
+```{r echo=FALSE, fig.height=4}
+ts1 = arima.sim(n=250, model=list(order=c(0,1,2), ma=c(0.4,0.5))) 
+ts2 = arima.sim(n=250, model=list(order=c(2,1,0), ar=c(0.4,0.5))) 
+
+
+par(mfrow=c(1,2), mar=c(2,4,2,2))
+plot(ts1)
+plot(ts2)
+```
+
+## EDA
+
+```{r echo=FALSE, fig.height=4}
+par(mfrow=c(2,3), mar=c(2,4,2,2))
+plot(ts1)
+Acf(ts1,main="")
+Pacf(ts1,main="")
+
+plot(ts2)
+Acf(ts2,main="")
+Pacf(ts2,main="")
+```
+
+## `ts1` - Finding $d$
+
+```{r echo=FALSE, fig.height=5}
+par(mfrow=c(3,3), mar=c(2,4,2,2))
+
+plot(diff(ts1), main="d=1")
+plot(diff(ts1,2), main="d=2")
+plot(diff(ts1,3), main="d=3")
+Acf(diff(ts1), main="")
+Acf(diff(ts1,2), main="")
+Acf(diff(ts1,3), main="")
+Pacf(diff(ts1), main="")
+Pacf(diff(ts1,2), main="")
+Pacf(diff(ts1,3), main="")
+```
+
+## `ts2` - Finding $d$
+
+```{r echo=FALSE, fig.height=5}
+par(mfrow=c(3,3), mar=c(2,4,2,2))
+plot(diff(ts2), main="d=1")
+plot(diff(ts2,2), main="d=2")
+plot(diff(ts2,3), main="d=3")
+Acf(diff(ts2), main="")
+Acf(diff(ts2,2), main="")
+Acf(diff(ts2,3), main="")
+Pacf(diff(ts2), main="")
+Pacf(diff(ts2,2), main="")
+Pacf(diff(ts2,3), main="")
+```
+
+## `ts1` - Models
+
+```{r echo=FALSE}
+expand.grid(p=0:2, d=1, q=0:2) %>%
+  by_row(
+   function(r) Arima(ts1, order = unlist(r))[c("aic","bic")] %>% unlist() %>% round(2), 
+   .collate="cols"
+  ) %>%
+  rename(AIC=.out1, BIC=.out2) %>%
+  arrange(AIC) %>%
+  knitr::kable()
+```
+
+## `ts2` - Models
+
+```{r echo=FALSE}
+expand.grid(p=0:2, d=1, q=0:2) %>%
+  by_row(
+   function(r) Arima(ts2, order = unlist(r))[c("aic","bic")] %>% unlist() %>% round(2), 
+   .collate="cols"
+  ) %>%
+  rename(AIC=.out1, BIC=.out2) %>%
+  arrange(AIC) %>%
+  knitr::kable()
+```
+
+## `ts1` - Model Choice {.t}
+
+```{r}
+Arima(ts1, order = c(0,1,2))
+```
+
+## `ts2` - Model Choice {.t}
+
+```{r}
+Arima(ts2, order = c(2,1,0))
+```
+
+##  Residuals
+
+```{r echo=FALSE, fig.height=4}
+ts1_resid = Arima(ts1, order = c(0,1,2))$residuals
+ts2_resid = Arima(ts2, order = c(2,1,0))$residuals
+
+par(mfrow=c(2,3), mar=c(2,4,6,2))
+plot(ts1_resid, main="ts1 Residuals")
+Acf(ts1_resid, main="")
+Pacf(ts1_resid, main="")
+plot(ts2_resid, main="ts2 Residuals")
+Acf(ts2_resid, main="")
+Pacf(ts2_resid, main="")
+```
+
+# Electrical Equipment Sales 
+
+## Data
+
+```{r echo=FALSE}
+library(fpp)
+elec_sales = seasadj(stl(elecequip, s.window="periodic"))
+
+par(mar=c(2,2,2,2))
+tsdisplay(elec_sales, points=FALSE)
+```
+
+## 1st order differencing
+
+```{r echo=FALSE}
+par(mar=c(2,2,2,2))
+tsdisplay(diff(elec_sales,1), points=FALSE)
+```
+
+## 2nd order differencing
+
+```{r echo=FALSE}
+par(mar=c(2,2,2,2))
+tsdisplay(diff(elec_sales,2), points=FALSE)
+```
+
+## Model {.t}
+
+```{r}
+Arima(elec_sales, order = c(3,1,0))
+```
+
+## Residuals
+
+```{r echo=FALSE}
+par(mar=c(2,2,2,2))
+```
+
+```{r}
+Arima(elec_sales, order = c(3,1,0)) %>% residuals() %>% tsdisplay(points=FALSE)
+```
+
+## Model Comparison
+
+```{r}
+Arima(elec_sales, order = c(3,1,0))$aic
+
+Arima(elec_sales, order = c(3,1,1))$aic
+
+Arima(elec_sales, order = c(4,1,0))$aic
+
+Arima(elec_sales, order = c(2,1,0))$aic
+```
+
+## Model fit
+
+```{r}
+plot(elec_sales, lwd=2, col=adjustcolor("black", alpha.f=0.75))
+Arima(elec_sales, order = c(3,1,0)) %>% fitted() %>% 
+  lines(col=adjustcolor('red',alpha.f=0.75),lwd=2)
+```
+
+## Model forecast
+
+```{r}
+Arima(elec_sales, order = c(3,1,0)) %>% forecast() %>% plot()
+```
+
+## General Guidance {.t}
+
+
+1. Positive autocorrelations out to a large number of lags usually indicates a need for differencing
+
+2. Slightly too much or slightly too little differencing can be corrected by adding AR or MA terms respectively.
+
+3. A model with no differencing usually includes a constant term, a model with two or more orders (rare) differencing usually does not include a constant term. 
+
+4. After differencing, if the PACF has a sharp cutoff then consider adding AR terms to the model.
+
+5. After differencing, if the ACF has a sharp cutoff then consider adding an MA term to the model.
+
+6. It is possible for an AR term and an MA term to cancel each other's effects, so try models with one fewer AR term and one fewer MA term.
+
+
+\scriptsize{Based on rules from \url{https://people.duke.edu/~rnau/411arim2.htm} and \url{https://people.duke.edu/~rnau/411arim3.htm}}

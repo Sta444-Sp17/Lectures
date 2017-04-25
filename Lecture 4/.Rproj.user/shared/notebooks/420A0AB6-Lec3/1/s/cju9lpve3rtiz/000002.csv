@@ -1,0 +1,39 @@
+"0","negbin_model = "
+"0","""model{"
+"0","  for(i in 1:length(Y))"
+"0","  {"
+"0","    Z[i] ~ dgamma(theta, theta)"
+"0","    log(lambda[i]) <- beta[1] + beta[2]*(X[i] - 1981) + beta[3]*(X[i] - 1981)^2"
+"0","    lambda_Z[i] <- Z[i]*lambda[i]"
+"0","    Y[i] ~ dpois(lambda_Z[i])"
+"0","    Y_hat[i] ~ dpois(lambda_Z[i])"
+"0","  }"
+"0","  for(j in 1:3){"
+"0","    beta[j] ~ dnorm(0, 1/100)"
+"0","  }"
+"0","  log_theta ~ dnorm(0, 1/100)"
+"0","  theta <- exp(log_theta)"
+"0","}"""
+"0","cat(negbin_model,""\n"")"
+"1","model{
+  for(i in 1:length(Y))
+  {
+    Z[i] ~ dgamma(theta, theta)
+    log(lambda[i]) <- beta[1] + beta[2]*(X[i] - 1981) + beta[3]*(X[i] - 1981)^2
+
+    lambda_Z[i] <- Z[i]*lambda[i]
+
+    Y[i] ~ dpois(lambda_Z[i])
+    Y_hat[i] ~ dpois(lambda_Z[i])
+  }
+
+  for(j in 1:3){
+    beta[j] ~ dnorm(0, 1/100)
+  }
+
+  log_theta ~ dnorm(0, 1/100)
+  theta <- exp(log_theta)
+}"
+"1"," "
+"1","
+"

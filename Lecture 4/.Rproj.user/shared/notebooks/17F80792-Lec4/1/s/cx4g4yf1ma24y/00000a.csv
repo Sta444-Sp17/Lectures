@@ -1,0 +1,6 @@
+"0","resid_f %>%"
+"0","  group_by(type, p_hat_bin) %>%"
+"0","  summarize(mean = mean(value)) %>%"
+"0","  ggplot(aes(x=p_hat_bin, y=mean, color=type)) +"
+"0","    geom_point() +"
+"0","    facet_wrap(~type, ncol=3, scale=""free_y"")"

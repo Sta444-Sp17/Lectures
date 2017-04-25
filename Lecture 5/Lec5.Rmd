@@ -1,0 +1,573 @@
+
+---
+title: "Lecture 5" 
+subtitle: "Random Effects Models"
+author: "Colin Rundel"
+date: "02/01/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 6
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE)
+
+set.seed(20170201)
+
+library(magrittr)
+library(dplyr)
+library(modelr)
+library(ggplot2)
+library(tidyr)
+library(rjags)
+library(stringr)
+library(gridExtra)
+
+theme_set(
+  theme_bw()  
+  #theme(plot.title = element_text(hjust = 0.5))
+)
+
+get_coda_parameter = function(coda, pattern)
+{
+  w = coda[[1]] %>% colnames() %>% str_detect(pattern)
+  coda[[1]][,w,drop=FALSE]
+}
+
+post_summary = function(m, ci_width=0.95)
+{
+  data_frame(
+    post_mean  = apply(m, 2, mean),
+    post_lower = apply(m, 2, quantile, probs=(1-ci_width)/2),
+    post_upper = apply(m, 2, quantile, probs=1 - (1-ci_width)/2)
+  )
+}
+
+```
+
+
+# Random Effects Models
+
+## Sleep Study Data
+
+\small
+The average reaction time per day for subjects in a sleep deprivation study. On day 0 the subjects had their normal amount of sleep. Starting that night they were restricted to 3 hours of sleep per night. The observations represent the average reaction time on a series of tests given each day to each subject.
+
+
+```{r message=FALSE}
+library(lme4)
+
+sleepstudy %>% tbl_df()
+```
+
+## EDA
+
+```{r echo=FALSE}
+ggplot(sleepstudy, aes(x=Days, y=Reaction, color=Subject)) +
+  geom_point()
+```
+
+## EDA (small multiples)
+
+```{r echo=FALSE}
+ggplot(sleepstudy, aes(x=Days, y=Reaction)) +
+  geom_point() +
+  facet_wrap(~Subject)
+```
+
+## Bayesian Linear Model
+
+```{r echo=FALSE}
+ss_lm = "model{
+  # Likelihood
+  for(i in 1:length(Reaction)){
+    Reaction[i] ~ dnorm(mu[i],tau2)
+    mu[i] <- beta_0 + beta_1*Days[i]
+
+    Y_hat[i] ~ dnorm(mu[i],tau2)
+  }
+
+  # Prior for beta
+  beta_0 ~ dnorm(0,1/10000)
+  beta_1 ~ dnorm(0,1/10000)
+
+  # Prior for sigma / tau2
+  sigma ~ dunif(0, 100) 
+  tau2 <- 1/(sigma*sigma)
+}"
+cat(ss_lm, "\n")
+```
+
+```{r echo=FALSE, include=FALSE}
+m = jags.model(
+        textConnection(ss_lm), 
+        data = sleepstudy, quiet = TRUE
+       ) 
+update(m, n.iter=1000, progress.bar="none")
+ss_lm_samp = coda.samples(
+        m, variable.names=c("beta_0","beta_1","sigma","Y_hat"), 
+        n.iter=5000, progress.bar="none"
+       )
+```
+
+## MCMC Diagnostics
+
+```{r echo=FALSE, fig.align="center"}
+plot(get_coda_parameter(ss_lm_samp, "beta|sigma"))
+```
+
+## Model fit
+
+```{r echo=FALSE}
+sleepstudy_lm = cbind(
+  sleepstudy,
+  get_coda_parameter(ss_lm_samp, "Y_hat") %>% post_summary()
+)  %>% 
+  mutate(resid = Reaction-post_mean)
+```
+
+```{r echo=FALSE}
+ggplot(sleepstudy_lm, aes(x=Days, y=Reaction)) +
+  geom_line(aes(y=post_mean), color='black', size=0.8, alpha=0.5) +
+  geom_ribbon(aes(ymin=post_lower, ymax=post_upper), fill='black', alpha=0.1) +
+  geom_point() +
+  facet_wrap(~Subject)
+```
+
+## Residuals
+
+```{r echo=FALSE}
+ggplot(sleepstudy_lm, aes(x=Days, y=resid, color=Subject)) +
+  geom_hline(yintercept=0, color="grey") + 
+  geom_point()
+```
+
+
+## Residuals by subject
+
+```{r echo=FALSE}
+sleepstudy_lm = sleepstudy_lm %>% 
+  mutate(resid = Reaction-post_mean)
+
+ggplot(sleepstudy_lm, aes(x=Days, y=resid)) +
+  geom_hline(yintercept=0, color="grey") + 
+  geom_point() + 
+  facet_wrap(~Subject, scale="free_y")
+```
+
+
+# Random Intercept Model
+
+## Data coding
+
+```{r}
+sleepstudy = sleepstudy %>% 
+  mutate(Subject_index = as.integer(Subject))
+
+sleepstudy[c(1:2,11:12,21:22,31:32),]
+```
+
+## Random Intercept Model
+
+Let $i$ represent each observation and $j(i)$ be subject in oberservation $i$ then
+
+$$ Y_i = \alpha_{j(i)}+ \beta_1 \times \text{Days} + \epsilon_i $$
+
+$$
+\begin{aligned}
+\alpha_j &\sim \mathcal{N}(\beta_0,~\sigma^2_\alpha)  \\
+\epsilon_i &\sim \mathcal{N}(0,~\sigma^2) \\
+\\
+\beta_0, \beta_1 &\sim \mathcal{N}(0, 10000)\\
+\sigma, \sigma_\alpha &\sim \text{Unif}(0,100)
+\end{aligned}
+$$
+
+
+
+## Random Intercept Model - JAGS
+
+
+```{r echo=FALSE, size="footnotesize"}
+ss_ri = "model{
+  for(i in 1:length(Reaction)) {
+    Reaction[i] ~ dnorm(mu[i],tau2)
+    mu[i] <- alpha[Subject_index[i]] + beta_1*Days[i]
+
+    Y_hat[i] ~ dnorm(mu[i],tau2)
+  }
+
+  for(j in 1:18) {
+    alpha[j] ~ dnorm(beta_0, tau2_alpha)
+  }
+  
+  sigma_alpha ~ dunif(0, 100) 
+  tau2_alpha <- 1/(sigma_alpha*sigma_alpha)
+
+  beta_0 ~ dnorm(0,1/10000)
+  beta_1 ~ dnorm(0,1/10000)
+
+  sigma ~ dunif(0, 100) 
+  tau2 <- 1/(sigma*sigma)
+}"
+cat(ss_ri,"\n")
+```
+
+```{r echo=FALSE, include=FALSE}
+m = jags.model(
+        textConnection(ss_ri), 
+        data = sleepstudy, quiet = TRUE
+       ) 
+update(m, n.iter=1000, progress.bar="none")
+ss_ri_samp = coda.samples(
+        m, variable.names=c("beta_0","beta_1","sigma", "alpha", "sigma_alpha","Y_hat"), 
+        n.iter=5000, progress.bar="none"
+       )
+```
+
+## MCMC Diagnostics
+
+```{r echo=FALSE, fig.height=4, fig.align="center"}
+plot(get_coda_parameter(ss_ri_samp, "beta|sigma")[,1:2])
+```
+
+## 
+
+```{r echo=FALSE, fig.height=4, fig.align="center"}
+plot(get_coda_parameter(ss_ri_samp, "beta|sigma")[,3:4])
+```
+
+##
+
+```{r echo=FALSE, fig.height=4, fig.align="center"}
+plot(get_coda_parameter(ss_ri_samp, "alpha")[,1:2])
+```
+
+## Model fit
+
+```{r echo=FALSE}
+sleepstudy_ri = cbind(
+  sleepstudy,
+  get_coda_parameter(ss_ri_samp, "Y_hat") %>% post_summary()
+)  %>% 
+  mutate(resid = Reaction-post_mean)
+```
+
+```{r echo=FALSE}
+ggplot(sleepstudy_ri, aes(x=Days, y=Reaction)) +
+  geom_line(aes(y=post_mean), color='blue', size=0.8, alpha=0.5) +
+  geom_ribbon(aes(ymin=post_lower, ymax=post_upper), fill='black', alpha=0.1) +
+  geom_point() +
+  facet_wrap(~Subject)
+```
+
+## Residuals by subject
+
+```{r echo=FALSE}
+ggplot(sleepstudy_ri, aes(x=Days, y=resid)) +
+  geom_hline(yintercept=0, color="grey") + 
+  geom_point() + 
+  facet_wrap(~Subject, scale="free_y")
+```
+
+## Random effects
+
+```{r echo=FALSE}
+ri_alpha = get_coda_parameter(ss_ri_samp, "^alpha") %>%
+  post_summary() %>%
+  mutate(Subject = unique(sleepstudy$Subject) %>% as.character()) %>%
+  arrange(post_mean) %>%
+  mutate(Subject = factor(Subject, levels = Subject))
+
+lm_beta_0 = get_coda_parameter(ss_lm_samp, "beta_0") %>%
+  post_summary()
+
+ggplot(ri_alpha, aes(y=Subject, x=post_mean)) +
+  geom_point(color="blue", alpha=0.5, size=1.5) + 
+  geom_errorbarh(aes(xmin=post_lower, xmax=post_upper), height=0, color="blue", alpha=0.5, size=1) +
+  geom_vline(data=lm_beta_0, aes(xintercept=post_mean), color="black", alpha=0.5) +
+  xlab("alpha")
+```
+
+## Why not a fixed effect for Subject?
+
+\small
+
+Not going to bother with the Bayesian model here because of all the dummy coding and betas ...
+. . .
+
+```{r}
+l = lm(Reaction ~ Days + Subject - 1, data=sleepstudy)
+summary(l)
+```
+
+## Comparing Model fit
+
+```{r echo=FALSE}
+sleepstudy_ri = sleepstudy_ri %>%
+  mutate(lm_pred = predict(l))
+```
+
+```{r echo=FALSE}
+ggplot(sleepstudy_ri, aes(x=Days, y=Reaction)) +
+  geom_line(aes(y=post_mean), color='blue', size=0.8, alpha=0.5) +
+  geom_line(aes(y=lm_pred), color='red', size=0.8, alpha=0.5) +
+  geom_point() +
+  facet_wrap(~Subject)
+```
+
+##
+
+```{r echo=FALSE}
+ggplot(sleepstudy_ri %>% filter(Subject %in% 308:330), aes(x=Days, y=Reaction)) +
+  geom_line(aes(y=post_mean), color='blue', size=0.8, alpha=0.5) +
+  geom_line(aes(y=lm_pred), color='red', size=0.8, alpha=0.5) +
+  geom_point() +
+  facet_wrap(~Subject)
+```
+
+
+## Random effects vs fixed effects
+
+```{r echo=FALSE}
+fix_eff = data_frame(
+  beta = coefficients(l)[-1],
+  Subject = names(coefficients(l)[-1]) %>% 
+    str_replace("Subject","") %>%
+    factor(levels=levels(ri_alpha$Subject))
+)
+
+ggplot(ri_alpha, aes(y=Subject, x=post_mean)) +
+  geom_point(color="blue", alpha=0.5, size=1.5) + 
+  geom_errorbarh(aes(xmin=post_lower, xmax=post_upper), height=0, color="blue", alpha=0.5, size=1) +
+  geom_vline(data=lm_beta_0, aes(xintercept=post_mean), color="black", alpha=0.5) +
+  geom_point(data = fix_eff, color="red", alpha=0.5, size=1.5, aes(x=beta)) +
+  xlab("alpha") 
+```
+
+
+
+## Random Intercept Model (Informative prior for $\sigma_\alpha$)
+
+```{r echo=FALSE, size="footnotesize"}
+ss_ri2 = "model{
+  for(i in 1:length(Reaction)) {
+    Reaction[i] ~ dnorm(mu[i],tau2)
+    mu[i] <- alpha[Subject_index[i]] + beta_1*Days[i]
+
+    Y_hat[i] ~ dnorm(mu[i],tau2)
+  }
+
+  for(j in 1:18) {
+    alpha[j] ~ dnorm(beta_0, tau2_alpha)
+  }
+  
+  sigma_alpha ~ dunif(0, 10) 
+  tau2_alpha <- 1/(sigma_alpha*sigma_alpha)
+
+  beta_0 ~ dnorm(0,1/10000)
+  beta_1 ~ dnorm(0,1/10000)
+
+  sigma ~ dunif(0, 100) 
+  tau2 <- 1/(sigma*sigma)
+}"
+cat(ss_ri2,"\n")
+```
+
+```{r echo=FALSE, include=FALSE}
+m = jags.model(
+        textConnection(ss_ri2), 
+        data = sleepstudy, quiet = TRUE
+       ) 
+update(m, n.iter=1000, progress.bar="none")
+ss_ri2_samp = coda.samples(
+        m, variable.names=c("beta_0","beta_1","sigma", "alpha", "sigma_alpha","Y_hat"), 
+        n.iter=5000, progress.bar="none"
+       )
+
+sleepstudy_ri2 = cbind(
+  sleepstudy,
+  get_coda_parameter(ss_ri2_samp, "Y_hat") %>% post_summary()
+)  %>% 
+  mutate(resid = Reaction-post_mean) %>%
+  mutate(lm1 = predict(lm(Reaction ~ Days+Subject, data=sleepstudy)),
+         lm2 = predict(lm(Reaction ~ Days, data=sleepstudy)))
+```
+
+## Comparing Model fit (Constrainged $\alpha$)
+
+```{r echo=FALSE}
+ggplot(sleepstudy_ri2, aes(x=Days, y=Reaction)) +
+  geom_line(aes(y=post_mean), color='blue', size=0.8, alpha=0.5) +
+  geom_line(aes(y=lm1), color='red', size=0.8, alpha=0.5) +
+  geom_line(aes(y=lm2), color='black', size=0.8, alpha=0.5) +
+  geom_point() +
+  facet_wrap(~Subject) +
+  guides(color=FALSE)
+```
+
+##
+
+```{r echo=FALSE}
+ggplot(sleepstudy_ri2 %>% filter(Subject %in% 308:330), aes(x=Days, y=Reaction)) +
+  geom_line(aes(y=post_mean), color='blue', size=0.8, alpha=0.5) +
+  geom_line(aes(y=lm1), color='red', size=0.8, alpha=0.5) +
+  geom_line(aes(y=lm2), color='black', size=0.8, alpha=0.5) +
+  geom_point() +
+  facet_wrap(~Subject)
+```
+
+
+## Prior Effect on $\alpha$
+
+```{r echo=FALSE}
+ri2_alpha = get_coda_parameter(ss_ri2_samp, "^alpha") %>%
+  post_summary() %>%
+  mutate(Subject = unique(sleepstudy$Subject) %>% as.character())
+
+both_alpha = rbind(
+  cbind(ri_alpha,  model="Random Intercept (non-informative prior)"),
+  cbind(ri2_alpha, model="Random Intercept (informative prior)")
+)
+
+ggplot(both_alpha, aes(y=Subject, x=post_mean)) +
+  geom_point(color="blue", alpha=0.5, size=1.5) + 
+  geom_errorbarh(aes(xmin=post_lower, xmax=post_upper), height=0, color="blue", alpha=0.5, size=1) +
+  geom_vline(data=lm_beta_0, aes(xintercept=post_mean), color="black", alpha=0.5) +
+  geom_point(data = fix_eff, color="red", alpha=0.5, size=1.5, aes(x=beta)) +
+  facet_wrap(~model, ncol=2) +
+  xlab("alpha") 
+```
+
+
+## Some Distribution Theory (about $\bm{Y} ~|~ \beta_0, \beta_1, \sigma, \sigma_\alpha$)
+
+
+
+# Random intercept and slope model
+
+## Model
+
+Let $i$ represent each observation and $j(i)$ be the subject in oberservation $i$ then
+
+$$ Y_i = \alpha_{j(i)}+ \beta_{j(i)} \times \text{Days} + \epsilon_i $$
+
+$$
+\begin{aligned}
+\alpha_j &\sim \mathcal{N}(\beta_0,~\sigma^2_\alpha)  \\
+\beta_j &\sim \mathcal{N}(\beta_1,~\sigma^2_\beta) \\
+\epsilon_i &\sim \mathcal{N}(0,~\sigma^2) \\
+\\
+\beta_0, \beta_1 &\sim \mathcal{N}(0, 10000)\\
+\sigma, \sigma_\alpha, \sigma_\beta &\sim \text{Unif}(0,100)
+\end{aligned}
+$$
+
+## Model - JAGS
+
+\vspace{-2mm}
+
+```{r echo=FALSE, size="footnotesize"}
+ss_ris = "model{
+  for(i in 1:length(Reaction)) {
+    Reaction[i] ~ dnorm(mu[i],tau2)
+    mu[i] <- alpha[Subject_index[i]] + beta[Subject_index[i]]*Days[i]
+    Y_hat[i] ~ dnorm(mu[i],tau2)
+  }
+
+  sigma ~ dunif(0, 100) 
+  tau2 <- 1/(sigma*sigma)
+
+  for(j in 1:18) {
+    alpha[j] ~ dnorm(beta_0, tau2_alpha)
+    beta[j]  ~ dnorm(beta_1, tau2_beta)
+  }
+
+  beta_0 ~ dnorm(0,1/10000)
+  beta_1 ~ dnorm(0,1/10000)  
+
+  sigma_alpha ~ dunif(0, 100) 
+  tau2_alpha <- 1/(sigma_alpha*sigma_alpha)
+
+  sigma_beta ~ dunif(0, 100) 
+  tau2_beta <- 1/(sigma_beta*sigma_beta)
+}"
+cat(ss_ris,"\n")
+```
+
+```{r echo=FALSE, include=FALSE}
+m = jags.model(
+  textConnection(ss_ris), 
+  data = sleepstudy, quiet = TRUE
+) 
+update(m, n.iter=1000, progress.bar="none")
+ss_ris_samp = coda.samples(
+  m, variable.names=c("alpha", "beta", "beta_0", "beta_1", 
+                      "sigma", "sigma_alpha", "sigma_beta", 
+                      "Y_hat"), 
+  n.iter=5000, progress.bar="none"
+)
+```
+
+
+## Model fit
+
+```{r echo=FALSE}
+sleepstudy_ris = cbind(
+  sleepstudy,
+  get_coda_parameter(ss_ris_samp, "Y_hat") %>% post_summary()
+)  %>% 
+  mutate(resid = Reaction-post_mean)
+```
+
+```{r echo=FALSE}
+ggplot(sleepstudy_ris, aes(x=Days, y=Reaction)) +
+  geom_line(aes(y=post_mean), color='orange', size=0.8, alpha=0.5) +
+  geom_ribbon(aes(ymin=post_lower, ymax=post_upper), fill='black', alpha=0.1) +
+  geom_point() +
+  facet_wrap(~Subject)
+```
+
+## Comparison
+
+```{r echo=FALSE}
+ggplot(sleepstudy, aes(x=Days, y=Reaction)) +
+  geom_line(data=sleepstudy_lm,  aes(y=post_mean), color='black',  size=0.8, alpha=0.5) +
+  geom_line(data=sleepstudy_ri,  aes(y=post_mean), color='blue',   size=0.8, alpha=0.5) +
+  geom_line(data=sleepstudy_ris, aes(y=post_mean), color='orange', size=0.8, alpha=0.5) +
+  geom_point() +
+  facet_wrap(~Subject)
+```
+
+## 
+
+```{r echo=FALSE}
+ggplot(sleepstudy %>% filter(Subject %in% 308:330), aes(x=Days, y=Reaction)) +
+  geom_line(data=sleepstudy_lm %>% filter(Subject %in% 308:330),  aes(y=post_mean), color='black',  size=0.8, alpha=0.5) +
+  geom_line(data=sleepstudy_ri %>% filter(Subject %in% 308:330),  aes(y=post_mean), color='blue',   size=0.8, alpha=0.5) +
+  geom_line(data=sleepstudy_ris %>% filter(Subject %in% 308:330), aes(y=post_mean), color='orange', size=0.8, alpha=0.5) +
+  geom_point() +
+  facet_wrap(~Subject)
+```
+
+
+
+
+
+## Residuals by subject
+
+```{r echo=FALSE}
+ggplot(sleepstudy_ris, aes(x=Days, y=resid)) +
+  geom_hline(yintercept=0, color="grey") + 
+  geom_point() + 
+  facet_wrap(~Subject, scale="free_y")
+```

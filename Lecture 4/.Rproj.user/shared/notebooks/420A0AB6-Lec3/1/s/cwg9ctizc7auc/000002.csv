@@ -1,0 +1,5 @@
+"0","lsy = lm(resid2~as.factor(year), data=co2_ls)"
+"0","co2_lsy = add_predictions(co2_ls, lsy, var = ""pred3"") %>% add_residuals(lsy, var=""resid3"")"
+"0","lsy_model = ls_resid + geom_line(data=co2_lsy, aes(y=pred3), col='red', alpha=0.5)"
+"0","lsy_resid = ggplot(co2_lsy, aes(x=date, y=resid3)) + geom_point() + geom_line(color=""grey"",size=0.5,alpha=0.5)"
+"0","grid.arrange(lsy_model, lsy_resid, ncol=1)"

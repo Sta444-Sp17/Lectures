@@ -1,0 +1,474 @@
+
+---
+title: "Lecture 8" 
+subtitle: "ARMA Models"
+author: "Colin Rundel"
+date: "02/13/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 6
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE)
+options(width=110)
+
+set.seed(20170213)
+
+library(magrittr)
+library(dplyr)
+library(modelr)
+library(ggplot2)
+library(tidyr)
+library(rjags)
+library(stringr)
+library(gridExtra)
+library(readr)
+library(purrr)
+library(forcats)
+
+theme_set(
+  theme_bw()  
+)
+
+get_coda_parameter = function(coda, pattern)
+{
+  w = coda[[1]] %>% colnames() %>% str_detect(pattern)
+  coda[[1]][,w,drop=FALSE]
+}
+
+post_summary = function(m, ci_width=0.95)
+{
+  data_frame(
+    post_mean  = apply(m, 2, mean),
+    post_lower = apply(m, 2, quantile, probs=(1-ci_width)/2),
+    post_upper = apply(m, 2, quantile, probs=1 - (1-ci_width)/2)
+  )
+}
+
+strip_attrs = function(obj)
+{
+  attributes(obj) = NULL
+  obj
+}
+
+strip_class = function(obj)
+{
+  attr(obj,"class") = NULL
+  obj
+}
+```
+
+# AR(p)
+
+## AR(p) {.t}
+
+From last time,
+
+$$
+\begin{aligned}
+AR(p): \quad y_t 
+  &= \delta + \phi_1 \, y_{t-1} + \phi_2 \, y_{t-2} + \cdots + \phi_p \, y_{t-p} + w_t  \\
+  &= \delta + w_t + \sum_{i=1}^p \phi_i \, y_{t-i}
+\end{aligned}
+$$
+
+What are the properities of $AR(p)$,
+
+1. Expected value?
+$$~$$
+
+2. Covariance / correlation?
+$$~$$
+
+3. Stationarity?
+$$~$$
+
+## Lag operator
+
+The lag operator is convenience notation for writing out AR (and other) time series models.
+
+We define the lag operator $L$ as follows,
+$$L \, y_t = y_{t-1}$$
+
+. . .
+
+this can be generalized where,
+$$
+\begin{aligned}
+L^2 y_t &= L\,L\, y_{t}\\
+        &= L \, y_{t-1} \\
+        &= y_{t-2} \\
+\end{aligned}
+$$
+therefore,
+$$L^k \, y_t = y_{t-k}$$
+
+## Lag polynomial {.t}
+
+An $AR(p)$ model can be rewitten as
+
+$$
+\begin{aligned}
+y_t &= \delta + \phi_1 \, y_{t-1} + \phi_2 \, y_{t-2} + \cdots + \phi_p \, y_{t-p} + w_t  \\
+y_t &= \delta + \phi_1 \, L \, y_t + \phi_2 \, L^2 \, y_t + \cdots + \phi_p \, L^p \, y_t + w_t
+\end{aligned}
+$$
+
+$$
+\begin{aligned}
+y_t - \phi_1 \, L \, y_t - \phi_2 \, L^2 \, y_t - \cdots - \phi_p \, L^p \, y_t &= \delta + w_t \\
+(1 - \phi_1 \, L - \phi_2 \, L^2 - \cdots - \phi_p \, L^p) \, y_t &= \delta + w_t
+\end{aligned}
+$$
+
+. . .
+
+$$~$$
+
+This polynomial of the lags 
+$$\phi_p(L) = (1 - \phi_1 \, L - \phi_2 \, L^2 - \cdots - \phi_p \, L^p)$$ 
+is called the lag or characteristic polynomial of the AR process.
+
+## Stationarity of $AR(p)$ processes {.t}
+
+An $AR(p)$ process is stationary if the roots of the characteristic polynomial lay outside the complex unit circle
+
+. . .
+
+Example AR(1):
+
+<!--
+$$
+\begin{aligned}
+y_t = \delta + \phi\, y_{t-1} + w_t \\
+(1-\phi \, L) y_t = \delta + w_t\\
+\\
+1-\phi \, L = 0 \\
+L = 1 / \phi \\
+\\
+|1/\phi| > 1 \\
+1 > |\phi|
+\end{aligned}
+$$
+-->
+
+
+## Example AR(2)
+
+<!--
+$$
+\begin{aligned}
+(1-\phi_1 \, L - \phi_2 \, L^2) y_t = \delta + w_t\\
+1-\phi_1 \, L - \phi_2 \, L^2 = 0 \\ 
+\lambda^2-\phi_1 \, \lambda - \phi_2  = 0 \quad \text{ where } \lambda = 1/L \\ 
+\lambda = \frac{-\phi_1 \pm \sqrt{\phi_1^2-4\phi_2}}{2}
+\end{aligned}
+$$
+-->
+
+
+## AR(2) Stationarity Conditions
+
+\begin{center}
+\includegraphics[width=0.85\textwidth]{figs/ar2_conditions.png}
+\end{center}
+
+\tiny{From \url{http://www.sfu.ca/~baa7/Teaching/econ818/StationarityAR2.pdf}}
+
+
+## Proof
+
+We can rewrite the $AR(p)$ model into an $AR(1)$ form using matrix notation
+
+$$
+\begin{aligned}
+y_t &= \delta + \phi_1 \, y_{t-1} + \phi_2 \, y_{t-2} + \cdots + \phi_p \, y_{t-p} + w_t  \\
+\bm\xi_t &= \bm{\delta} + \bm{F} \, \bm\xi_{t-1} + \bm w_t
+\end{aligned}
+$$
+where
+$$
+\begin{aligned}
+\begin{bmatrix}
+y_t \\
+y_{t-1} \\
+y_{t-2} \\
+\vdots \\
+y_{t-p+1}
+\end{bmatrix} 
+&=
+\begin{bmatrix}
+\delta \\
+0 \\
+0 \\
+\vdots \\
+0
+\end{bmatrix}
++
+\begin{bmatrix}
+\phi_1 & \phi_2 & \phi_3 & \cdots & \phi_{p-1} & \phi_p \\
+1 & 0 & 0 & \cdots & 0 & 0 \\
+0 & 1 & 0 & \cdots & 0 & 0 \\
+\vdots & \vdots & \vdots & \cdots & \vdots & \vdots \\
+1 & 0 & 0 & \cdots & 1 & 0 \\
+\end{bmatrix} 
+\begin{bmatrix}
+y_{t-1} \\
+y_{t-2} \\
+y_{t-3} \\
+\vdots \\
+y_{t-p}
+\end{bmatrix} 
++
+\begin{bmatrix}
+w_t \\
+0 \\
+0 \\
+\vdots \\
+0
+\end{bmatrix} \\
+&=
+\begin{bmatrix}
+\delta + w_t + \sum_{i=1}^p \phi_i \, y_{t-i} \\
+y_{t-1} \\
+y_{t-2} \\
+\vdots \\
+y_{t-p+1}
+\end{bmatrix}
+\end{aligned}
+$$
+
+
+## Proof sketch (cont.) {.t}
+
+So just like the original $AR(1)$ we can expand out the autoregressive equation
+
+$$
+\begin{aligned}
+\bm\xi_t 
+  &= \bm{\delta} + \bm w_t + \bm{F} \, \bm\xi_{t-1}  \\
+  &= \bm{\delta} + \bm w_t + \bm{F} \, (\bm\delta+\bm w_{t-1}) + \bm{F}^2 \, (\bm \delta+\bm w_{t-2}) + \cdots \\
+  &\qquad\qquad~\,\,\,                        + \bm{F}^{t-1} \, (\bm \delta+\bm w_{1}) + \bm{F}^t \, (\bm \delta+\bm w_0) \\
+  &= \bm{\delta} \sum_{i=0}^t F^i + \sum_{i=0}^t F^i \, w_{t-i}
+\end{aligned}
+$$
+
+and therefore we need $\underset{t\to\infty}{\lim} F^t \to 0$.
+
+
+## Proof sketch (cont.) {.t}
+
+We can find the eigen decomposition such that $\bm F = \bm Q \bm \Lambda \bm Q^{-1}$ where the columns of $\bm Q$ are the eigenvectors of $\bm F$ and $\bm \Lambda$ is a diagonal matrix of the corresponding eigenvalues.
+
+A useful property of the eigen decomposition is that
+
+$$ \bm{F}^i = \bm Q \bm \Lambda^i \bm Q^{-1} $$
+
+. . .
+
+Using this property we can rewrite our equation from the previous slide as
+
+$$
+\begin{aligned}
+\bm\xi_t 
+  &= \bm{\delta} \sum_{i=0}^t F^i + \sum_{i=0}^t F^i \, w_{t-i} \\
+  &= \bm{\delta} \sum_{i=0}^t \bm Q \bm \Lambda^i \bm Q^{-1} + \sum_{i=0}^t \bm Q \bm \Lambda^i \bm Q^{-1} \, w_{t-i}
+\end{aligned}
+$$
+
+
+## Proof sketch (cont.) {.t}
+
+$$
+\bm \Lambda^i = \begin{bmatrix}
+\lambda_1^i & 0 & \cdots & 0 \\
+0 & \lambda_2^i & \cdots & 0 \\
+\vdots & \vdots & \ddots & \vdots \\
+0 & 0 & \cdots & \lambda_p^i \\
+\end{bmatrix}
+$$
+
+Therefore,
+$$\underset{t\to\infty}{\lim} F^t \to 0$$
+when 
+$$\underset{t\to\infty}{\lim} \Lambda^t \to 0$$ 
+which requires that 
+$$|\lambda_i| < 1 \;\; \text{ for all} \; i$$
+
+## Proof sketch (cont.)
+
+Eigenvalues are defined such that for $\bm \lambda$, 
+
+$$ \det (\bm{F}-\bm\lambda\,\bm{I}) = 0$$
+
+based on our definition of $\bm F$ our eigenvalues will therefore be the roots of
+
+$$\lambda^p -\phi_1\,\lambda^{p-1}-\phi_2\,\lambda^{p-2} - \cdots - \phi_{p_1} \, \lambda^1 - \phi_p = 0$$
+
+. . .
+
+which if we multiply by $1/\lambda^p$ where $L = 1/\lambda$ gives
+
+$$1 -\phi_1\,L-\phi_2\,L^2 - \cdots - \phi_{p_1} \, L^{p-1} - \phi_p \, L^p = 0$$
+
+
+## Properties of $AR(p)$
+
+For a *stationary* $AR(p)$ process where $w_t$ has $E(w_t) = 0$ and $Var(w_t) = \sigma_w^2$
+
+$$ 
+\begin{aligned}
+E(Y_t) &= \frac{\delta}{1-\phi_1 -\phi_2-\cdots-\phi_p} \\
+\\
+Var(Y_t) &= \gamma_0 = \phi_1\gamma_1 + \phi_2\gamma_2 + \cdots + \phi_p\gamma_p + \sigma_w^2 \\
+\\
+Cov(Y_t,Y_{t-j}) &= \gamma_j = \phi_1\gamma_{j-1} + \phi_2\gamma_{j-2} + \cdots + \phi_p\gamma_{j-p} \\
+\\
+Corr(Y_t,Y_{t-j}) &= \rho_j = \phi_1\rho{j-1} + \phi_2\rho{j-2} + \cdots + \phi_p\rho_{j-p}
+\end{aligned}
+$$
+
+
+# Moving Average (MA) Processes
+
+## MA(1) {.t}
+
+A moving average process is similar to an AR process, except that the autoregression is on the error term.
+$$ MA(1): \qquad y_t = \delta + w_t + \theta \, w_{t-1} $$
+
+Properties:
+
+
+## Time series
+
+```{r echo=FALSE, dev="png", dpi=150}
+ma = data_frame(
+  t = 1:200,
+  "θ=0.1" = arima.sim(n=200, list(ma=c(0.1))) %>% strip_attrs(),
+  "θ=0.8" = arima.sim(n=200, list(ma=c(0.8))) %>% strip_attrs(),
+  "θ=2.0" = arima.sim(n=200, list(ma=c(2.0))) %>% strip_attrs(),
+  "θ=-0.1" = arima.sim(n=200, list(ma=c(-0.1))) %>% strip_attrs(),
+  "θ=-0.8" = arima.sim(n=200, list(ma=c(-0.8))) %>% strip_attrs(),
+  "θ=-2.0" = arima.sim(n=200, list(ma=c(-2.0))) %>% strip_attrs()
+) 
+  
+ma %>%
+  gather(model, y, -t) %>%
+  mutate(model = as_factor(model)) %>%
+  ggplot(aes(x=t,y=y)) +
+    geom_line() +
+    facet_wrap(~model)
+```
+
+## ACF
+
+```{r echo=FALSE}
+par(mfrow=c(2,3))
+acf(ma$`θ=-0.1`, lag.max = 10, main=expression(paste(theta,"=-0.1")))
+acf(ma$`θ=-0.8`, lag.max = 10, main=expression(paste(theta,"=-0.8")))
+acf(ma$`θ=-2.0`, lag.max = 10, main=expression(paste(theta,"=-2.0")))
+acf(ma$`θ=0.1`, lag.max = 10, main=expression(paste(theta,"=0.1")))
+acf(ma$`θ=0.8`, lag.max = 10, main=expression(paste(theta,"=0.8")))
+acf(ma$`θ=2.0`, lag.max = 10, main=expression(paste(theta,"=2.0")))
+```
+
+## MA(q) {.t}
+
+$$ MA(q): \qquad y_t = \delta + w_t + \theta_1 \, w_{t-1} + \theta_2 \, w_{t-2} + \cdots + \theta_q \, w_{t-q} $$
+
+Properties:
+
+
+## Time series
+
+```{r echo=FALSE, dev="png", dpi=150}
+ma_q = data_frame(
+  t = 1:100,
+  "θ={-1.5}"           = arima.sim(n=100, list(ma=c(-1.5)))           %>% strip_attrs(),
+  "θ={-1.5, -1}"       = arima.sim(n=100, list(ma=c(-1.5, -1)))       %>% strip_attrs(),
+  "θ={-1.5, -1, 2}"    = arima.sim(n=100, list(ma=c(-1.5, -1, 2)))    %>% strip_attrs(),
+  "θ={-1.5, -1, 2, 3}" = arima.sim(n=100, list(ma=c(-1.5, -1, 2, 3))) %>% strip_attrs()
+) 
+  
+ma_q %>%
+  gather(model, y, -t) %>%
+  mutate(model = as_factor(model)) %>%
+  ggplot(aes(x=t,y=y)) +
+    geom_line() +
+    facet_wrap(~model)
+```
+
+## ACF
+
+```{r echo=FALSE}
+par(mfrow=c(2,2))
+acf(ma_q[[2]], lag.max = 10, main=expression(paste(theta,"={-1.5}"          )))
+acf(ma_q[[3]], lag.max = 10, main=expression(paste(theta,"={-1.5, -1}"      )))
+acf(ma_q[[4]], lag.max = 10, main=expression(paste(theta,"={-1.5, -1, 2}"   )))
+acf(ma_q[[5]], lag.max = 10, main=expression(paste(theta,"={-1.5, -1, 2, 3}")))
+```
+
+
+# ARMA Model
+
+## ARMA Model {.t}
+
+An ARMA model is a composite of AR and MA processes,
+
+$$
+\begin{aligned}
+ARMA(p,q): \quad\quad\\
+   y_t &= \delta + \phi_1 \, y_{t-1} + \cdots \phi_p \, y_{t-p} + w_{t} + \theta_1 w_{t-1} + \cdots + \theta_q w_{t_q} \\
+  \phi_p(L) y_t &= \delta + \theta_q(L)w_t 
+\end{aligned}
+$$
+
+Since all $MA$ processes are stationary, we only need to examine the $AR$ aspect to determine stationarity (roots of $\phi_p(L)$ lie outside the complex unit circle).
+
+
+## Time series
+
+```{r echo=FALSE, out.width="1.2\\textwidth", fig.height=5, dev="png", dpi=150}
+arma = data_frame(
+  t = 1:100,
+  "φ={0.9}, θ={-}"    = arima.sim(n=100, list(ar=c( 0.9), ma=c()   )) %>% strip_attrs(),
+  "φ={-0.9}, θ={-}"   = arima.sim(n=100, list(ar=c(-0.9), ma=c()   )) %>% strip_attrs(),
+  "φ={-}, θ={0.9}"    = arima.sim(n=100, list(ar=c(),     ma=c(0.9))) %>% strip_attrs(),
+  "φ={-}, θ={-0.9}"   = arima.sim(n=100, list(ar=c(),     ma=c(-0.9))) %>% strip_attrs(),
+  "φ={0.9}, θ={0.9}"  = arima.sim(n=100, list(ar=c( 0.9), ma=c(0.9))) %>% strip_attrs(),
+  "φ={-0.9}, θ={0.9}" = arima.sim(n=100, list(ar=c(-0.9), ma=c(0.9))) %>% strip_attrs(),
+  "φ={0.9}, θ={-0.9}"  = arima.sim(n=100, list(ar=c( 0.9), ma=c(-0.9))) %>% strip_attrs(),
+  "φ={-0.9}, θ={-0.9}" = arima.sim(n=100, list(ar=c(-0.9), ma=c(0.9))) %>% strip_attrs()
+) 
+  
+arma %>%
+  gather(model, y, -t) %>%
+  mutate(model = as_factor(model)) %>%
+  ggplot(aes(x=t,y=y)) +
+    geom_line() +
+    facet_wrap(~model, ncol=4)
+```
+
+## ACF
+
+```{r echo=FALSE, out.width="1.2\\textwidth", fig.height=5}
+par(mfrow=c(2,4))
+acf(arma[[2]], lag.max = 10, main=expression(paste(phi,"={0.9}, ",theta,"={-}"    )))
+acf(arma[[3]], lag.max = 10, main=expression(paste(phi,"={-0.9}, ",theta,"={-}"   )))
+acf(arma[[4]], lag.max = 10, main=expression(paste(phi,"={-}, ",theta,"={0.9}"    )))
+acf(arma[[5]], lag.max = 10, main=expression(paste(phi,"={-}, ",theta,"={-0.9}"   )))
+acf(arma[[6]], lag.max = 10, main=expression(paste(phi,"={0.9}, ",theta,"={0.9}"  )))
+acf(arma[[7]], lag.max = 10, main=expression(paste(phi,"={-0.9}, ",theta,"={0.9}" )))
+acf(arma[[8]], lag.max = 10, main=expression(paste(phi,"={0.9}, ",theta,"={-0.9}" )))
+acf(arma[[9]], lag.max = 10, main=expression(paste(phi,"={-0.9}, ",theta,"={-0.9}")))
+```

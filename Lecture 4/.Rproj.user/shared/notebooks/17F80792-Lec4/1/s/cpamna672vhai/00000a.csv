@@ -1,0 +1,4 @@
+"0","d_g = d_g %>%"
+"0","  mutate(pearson = (presence - p_hat)/(p_hat*(1-p_hat)))"
+"0","ggplot(d_g, aes(x=p_hat, y=pearson)) +"
+"0","  geom_point()"

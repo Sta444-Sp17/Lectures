@@ -1,0 +1,2 @@
+"0","betas = get_coda_parameter(samp, ""beta"")"
+"0","plot(betas)"

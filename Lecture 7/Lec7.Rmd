@@ -1,0 +1,511 @@
+
+---
+title: "Lecture 7" 
+subtitle: "AR Models"
+author: "Colin Rundel"
+date: "02/08/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 6
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE)
+options(width=110)
+
+set.seed(20170208)
+
+library(magrittr)
+library(dplyr)
+library(modelr)
+library(ggplot2)
+library(tidyr)
+library(rjags)
+library(stringr)
+library(gridExtra)
+library(readr)
+library(purrr)
+
+theme_set(
+  theme_bw()  
+)
+
+get_coda_parameter = function(coda, pattern)
+{
+  w = coda[[1]] %>% colnames() %>% str_detect(pattern)
+  coda[[1]][,w,drop=FALSE]
+}
+
+post_summary = function(m, ci_width=0.95)
+{
+  data_frame(
+    post_mean  = apply(m, 2, mean),
+    post_lower = apply(m, 2, quantile, probs=(1-ci_width)/2),
+    post_upper = apply(m, 2, quantile, probs=1 - (1-ci_width)/2)
+  )
+}
+
+strip_attrs = function(obj)
+{
+  attributes(obj) = NULL
+  obj
+}
+
+strip_class = function(obj)
+{
+  attr(obj,"class") = NULL
+  obj
+}
+```
+
+# Lagged Predictors and CCFs
+
+## Southern Oscillation Index & Recruitment
+
+The Southern Oscillation Index (SOI) is an indicator of the development and intensity of El Niño (negative SOI) or La Niña (positive SOI) events in the Pacific Ocean. These data also included the estimate of "recruitment", which indicate fish population sizes in the southern hemisphere.
+
+```{r echo=FALSE}
+library(astsa)
+
+fish = data_frame(
+  date = time(soi) %>% strip_attrs(),
+  soi = soi %>% strip_attrs(),
+  recruitment = rec %>% strip_attrs()
+)
+fish
+```
+
+## Time series
+
+```{r echo=FALSE}
+fish %>%
+  gather(Variables, value, -date) %>%
+  ggplot(aes(x=date, y=value, color=Variables)) +
+    geom_line() +
+    facet_wrap(~Variables, nrow=2, scale="free_y") +
+    ylab("")
+```
+
+## Relationship?
+
+```{r echo=FALSE}
+fish %>%
+  ggplot(aes(x=soi, y=recruitment)) +
+  geom_point() + 
+  geom_smooth(color="red", alpha=0.5, se=FALSE)
+```
+
+## ACFs & PACFs
+
+```{r echo=FALSE}
+par(mfrow=c(2,2))
+
+acf(fish$soi, lag.max = 36)
+pacf(fish$soi, lag.max = 36)
+acf(fish$recruitment, lag.max = 36)
+pacf(fish$recruitment, lag.max = 36)
+```
+
+## Cross correlation function
+
+```{r echo=FALSE}
+ccf(fish$soi, fish$recruitment)
+```
+
+## Cross correlation function - Scatter plots
+
+```{r echo=FALSE, warning=FALSE, fig.align="center"}
+fish_lags = fish %>%
+  mutate(
+    "soi(t-00)" = lag(soi,0),
+    "soi(t-01)" = lag(soi,1),
+    "soi(t-02)" = lag(soi,2),
+    "soi(t-03)" = lag(soi,3),
+    "soi(t-04)" = lag(soi,4),
+    "soi(t-05)" = lag(soi,5),
+    "soi(t-06)" = lag(soi,6),
+    "soi(t-07)" = lag(soi,7),
+    "soi(t-08)" = lag(soi,8),
+    "soi(t-09)" = lag(soi,9),
+    "soi(t-10)" = lag(soi,10),
+    "soi(t-11)" = lag(soi,11)
+  ) 
+
+corrs = fish_lags %>%
+  select(-soi, -date) %>%
+  gather(lag, soi, -recruitment) %>%
+  group_by(lag) %>%
+  summarize(corr = cor(soi, recruitment, use="complete.obs"))
+
+fish_lags %>%
+  select(-soi, -date) %>%
+  gather(lag, soi, -recruitment) %>%
+  ggplot(aes(x=soi, y=recruitment)) +
+    geom_point(alpha=0.3) +
+    facet_wrap(~lag) +
+    #geom_line(stat="smooth", method="loess", color='red',  size=1.2, alpha=0.75) +
+    geom_line(stat="smooth", method="lm",    color="blue", size=1.2, alpha=0.75) +
+    geom_text(data=corrs, aes(x=-0.85, y=5, label=round(corr,3)), size=3)
+```
+
+
+## Model
+
+```{r echo=FALSE}
+model1    = lm(recruitment~lag(soi,6), data=fish)
+model2   = lm(recruitment~lag(soi,6)+lag(soi,7), data=fish)
+model3 = lm(recruitment~lag(soi,5)+lag(soi,6)+lag(soi,7)+lag(soi,8), data=fish)
+
+summary(model3)
+```
+
+## Prediction
+
+```{r echo=FALSE, warning=FALSE, fig.align="center"}
+fish %>%
+  add_predictions(., model1,    var = paste0("Model 1 - soi lag 6 (RMSE: ", round(rmse(model1,.),1),")")) %>%
+  add_predictions(., model2,   var = paste0("Model 2 - soi lags 6,7 (RMSE: ", round(rmse(model2,.),1),")")) %>%
+  add_predictions(., model3, var = paste0("Model 3 - soi lags 5,6,7,8 (RMSE: ", round(rmse(model3,.),1),")")) %>%
+  gather(model, pred, -(date:recruitment)) %>%
+  ggplot(aes(x=date,y=recruitment)) +
+    geom_line() +
+    geom_line(aes(y=pred), col="red") +
+    facet_wrap(~model,nrow=3)
+```
+
+## Residual ACF - Model 3
+
+```{r echo=FALSE}
+par(mfrow=c(1,2))
+acf(residuals(model3))
+pacf(residuals(model3))
+```
+
+## Autoregessive model 1
+
+```{r echo=FALSE}
+model4 = lm(recruitment~lag(recruitment,1) + lag(recruitment,2) + lag(soi,5)+lag(soi,6)+lag(soi,7)+lag(soi,8), data=fish)
+
+summary(model4)
+```
+
+## Autoregessive model 2
+
+```{r echo=FALSE}
+model5 = lm(recruitment~lag(recruitment,1) + lag(recruitment,2) + lag(soi,5)+lag(soi,6), data=fish)
+
+summary(model5)
+```
+
+## Prediction
+
+```{r echo=FALSE, warning=FALSE, fig.align="center"}
+fish %>%
+  add_predictions(., model3,      var = paste0("Model 3 - soi lags 5,6,7,8 (RMSE: ", round(rmse(model3,.),2),")")) %>%
+  add_predictions(., model4, var = paste0("Model 4 - AR(2); soi lags 5,6,7,8 (RMSE: ", round(rmse(model4,.),2),")")) %>%
+  add_predictions(., model5,   var = paste0("Model 5 - AR(2); soi lags 5,6 (RMSE: ", round(rmse(model5,.),2),")")) %>%
+  gather(model, pred, -(date:recruitment)) %>%
+  ggplot(aes(x=date,y=recruitment)) +
+    geom_line() +
+    geom_line(aes(y=pred), col="red") +
+    facet_wrap(~model,nrow=3)
+```
+
+## Residual ACF - Model 5
+
+```{r echo=FALSE}
+par(mfrow=c(1,2))
+acf(residuals(model5))
+pacf(residuals(model5))
+```
+
+# Non-stationarity
+
+## Non-stationary models {.t}
+
+\vspace{5mm}
+
+> All happy families are alike; each unhappy family is unhappy in its own way. 
+> - Tolstoy, Anna Karenina
+
+This applies to time series models as well, just replace happy family with stationary model.
+
+. . .
+
+
+\vspace{3mm}
+
+A simple example of a non-stationary time series is a trend stationary model 
+
+$$ y_t = \mu_t + w_t $$
+
+where $\mu_t$ denotes the trend and $w_t$ is a stationary process. 
+
+. . . 
+
+We've already been using this approach, since it is the same as estimating $\mu_t$ via regression and then examining the residuals ($\hat{w}_t = y_t - \hat{mu}_t$) for stationarity.
+
+## Linear trend model
+
+Lets imagine a simple model where $y_t = \delta + \phi t + w_t$ where $\delta$ and $\phi$ are constants and $w_t \sim \mathcal{N}(0,\sigma^2_w)$.
+
+```{r echo=FALSE}
+delta = 1
+phi = 0.1
+lt = data_frame(
+  t = 1:100,
+  w = rnorm(100)
+) %>%
+  mutate(y = delta + phi * t + w)
+
+ggplot(lt, aes(x=t,y=y)) + 
+  geom_point() +
+  geom_line() + 
+  labs(title="Linear trend")
+```
+
+
+
+## Differencing {.t}
+
+An alternative approach to what we have seen is to examine the differences of your response variable, specifically $y_t - y_{t-1}$.
+
+<!--
+$$
+\begin{aligned}
+y_t - y_{t-1} &=  (\delta + \phi t + w_t) - (\delta + \phi (t-1) + w_{t-1})\\
+&= \phi t - \phi t + \phi + w_t - w_{t-1} \\
+&= \phi + w_t - w_{t-1}
+\end{aligned}
+$$
+-->
+
+## Detrending vs Difference
+
+```{r echo=FALSE}
+grid.arrange(
+  lt %>%
+    add_residuals(.,lm(y~t,data=.)) %>%
+    ggplot(aes(x=t,y=resid)) + 
+      geom_point() +
+      geom_line() + 
+      labs(title="Detrended"),
+  data_frame(t=1:99, y_diff=diff(lt$y)) %>%
+    ggplot(aes(x=t, y=y_diff)) +
+      geom_point() +
+      geom_line() + 
+      labs(title="Differenced")
+)
+```
+
+## Quadratic trend model
+
+Lets imagine another simple model where $y_t = \delta + \phi t + \gamma t^2 + w_t$ where $\delta$, $\phi$, and $\gamma$ are constants and $w_t \sim \mathcal{N}(0,\sigma^2_w)$.
+
+```{r echo=FALSE}
+delta = 1
+phi = 0.01
+gamma = 0.001
+qt = data_frame(
+  t = 1:100,
+  w = rnorm(100)
+) %>%
+  mutate(y = delta + phi * t + gamma*t^2 + w)
+
+ggplot(qt, aes(x=t,y=y)) + 
+  geom_point() +
+  geom_line() + 
+  labs(title="Quadratic trend")
+```
+
+## Detrending
+
+```{r echo=FALSE}
+grid.arrange(
+  qt %>%
+    add_residuals(.,lm(y~t,data=.)) %>%
+    ggplot(aes(x=t,y=resid)) + 
+      geom_point() +
+      geom_line() + 
+      labs(title="Detrended - Linear"),
+  qt %>%
+    add_residuals(.,lm(y~t+I(t^2),data=.)) %>%
+    ggplot(aes(x=t,y=resid)) + 
+      geom_point() +
+      geom_line() + 
+      labs(title="Detrended - Quadratic")
+)
+```
+
+## 2nd order differencing {.t}
+
+Let $d_t = y_t - y_{t-1}$ be a first order difference then $d_t - d_{t-1}$ is a 2nd order difference.
+
+<!-- 
+$$
+\begin{aligned}
+d_t - d_{t-1} &= (y_t - y_{t-1}) - (y_{t-1} - y_{t-2}) \\
+\\
+y_t - y_{t-1} 
+  &=  (\delta + \phi t + \gamma t^2 + w_t) - (\delta + \phi (t-1) + \gamma (t-1)^2 +  w_{t-1})\\
+  &= \phi + w_t - w_{t-1} + \gamma t^2 - \gamma (t^2-2t+1) \\
+  &= \phi + w_t - w_{t-1} + \gamma 2t - \gamma \\
+\\
+y_{t-1} - y_{t-2} 
+  &= \phi + w_{t-1} - w_{t-2} + \gamma (t^2-2t+2) - \gamma (t^2-4t+4) \\
+  &= \phi + w_{t-1} - w_{t-2} + \gamma 2t - 2\gamma \\
+\\
+d_t - d_{t-1} &= \gamma +  w_t - 2w_{t-1} + w_{t-2}
+\end{aligned}
+$$
+-->
+
+
+## Differencing
+
+```{r echo=FALSE}
+grid.arrange(
+  data_frame(t=1:99, y_diff=diff(qt$y)) %>%
+    ggplot(aes(x=t, y=y_diff)) +
+      geom_point() +
+      geom_line() + 
+      labs(title="1st Difference"),
+  data_frame(t=1:98, y_diff=diff(qt$y, differences=2)) %>%
+    ggplot(aes(x=t, y=y_diff)) +
+      geom_point() +
+      geom_line() + 
+      labs(title="2nd Difference")
+)
+```
+
+## Differencing - ACF
+
+```{r echo=FALSE, fig.align="center"}
+par(mfrow=c(3,2))
+acf(qt$y)
+pacf(qt$y)
+acf(diff(qt$y))
+pacf(diff(qt$y))
+acf(diff(qt$y, differences = 2))
+pacf(diff(qt$y, differences = 2))
+```
+
+# AR Models
+
+## AR(1) 
+
+Last time we mentioned a random walk with trend process where $y_t = \delta + y_{t-1} + w_t$. The AR(1) process is a slight variation of this where we add a coefficient in front of the $y_{t-1}$ term. 
+$$AR(1): \quad y_t = \delta + \phi \, y_{t-1} + w_t $$
+
+```{r echo=FALSE, fig.height=4, out.width="0.8\\textwidth", fig.align="center"}
+delta = 0.1
+phi1 = 0.9
+phi2 = 1
+
+ar1 = data_frame(
+  t = 1:1000,
+  w = rnorm(1000)
+)
+
+ar1$y1 = 0
+ar1$y2 = 0
+
+for(t in 2:1000)
+{
+  ar1$y1[t] = delta + phi1 * ar1$y1[t-1] + ar1$w[t]
+  ar1$y2[t] = delta + phi2 * ar1$y2[t-1] + ar1$w[t]
+}
+
+grid.arrange(
+  ggplot(ar1, aes(x=t, y=y1)) + geom_line() + labs(title="AR(1) w/ phi < 1"),
+  ggplot(ar1, aes(x=t, y=y2)) + geom_line() + labs(title="AR(1) w/ phi >= 1")
+)
+
+```
+
+## Stationarity {.t}
+
+Lets rewrite the AR(1) without any autoregressive terms
+
+<!--
+$$
+\begin{aligned}
+y_t &= \delta + \phi \, y_{t-1} + w_t \\
+\\
+y_0 &= y_0 \\
+y_1 &= \delta + w_1 + \phi y_0\\
+y_2 &= \delta + w_2 + \phi(\delta + w_1 + \phi y_0) = \phi\delta + \delta + \phi w_1 + w_2 + \phi^2 y_0 \\
+y_3 &= (\phi^2\delta + \phi\delta + \delta) + (\phi^2 w_1 + \phi w_2 + w_3) + (\phi^3 y_0) \\
+&~~\vdots \\
+y_t &= \left( \delta \sum_{i=0}^{t-1} \phi^i \right) + \left(\sum_{i=0}^{t-1}\phi^i w_{t-i}\right) + \left(\phi^t y_0\right) \\
+    &\approx \frac{\delta}{1-\phi} + \sum_{i=0}^{t-1}\phi^i w_{t-i} \text{     when $t$ is large}
+\end{aligned}
+$$
+-->
+
+## Differencing {.t}
+
+Once again we can examine differences of the response variable $y_t - y_{t-1}$ to attempt to achieve stationarity,s
+
+<!--
+$$
+\begin{aligned}
+y_t - y_{t-1} 
+  &= (\delta + \phi \, y_{t-1} + w_t) - y_{t-1} \\
+  &= \delta + (\phi-1) \, y_{t-1} + w_t
+\end{aligned}
+$$
+-->
+
+## Identifying AR(1) Processes
+
+```{r echo=FALSE}
+sims = data_frame(
+  t = 1:100,
+  "phi=-0.9" = arima.sim(n = 100, list(ar = -0.9)) %>% strip_attrs(),
+  "phi=-0.5" = arima.sim(n = 100, list(ar = -0.5)) %>% strip_attrs(), 
+  "phi= 0"   = arima.sim(n = 100, list(ar =  0.0)) %>% strip_attrs(), 
+  "phi= 0.5" = arima.sim(n = 100, list(ar =  0.5)) %>% strip_attrs(), 
+  "phi= 0.9" = arima.sim(n = 100, list(ar =  0.9)) %>% strip_attrs()
+)
+
+sims %>%
+  gather(model, vals, -t) %>%
+  ggplot(aes(x=t, y=vals)) +
+    geom_line() +
+    facet_wrap(~model)
+```
+
+## Identifying AR(1) Processes - ACFs
+
+```{r echo=FALSE}
+par(mfrow=c(2,3))
+acf(sims$`phi= 0`)
+acf(sims$`phi= 0.5`)
+acf(sims$`phi= 0.9`)
+acf(sims$`phi=-0.5`)
+acf(sims$`phi=-0.9`)
+```
+
+## AR(p) models {.t}
+
+We can easily generalize from an AR(1) to an AR(p) model by simply adding additional autoregressive terms to the model.
+
+$$ 
+\begin{aligned}
+AR(p): \quad y_t 
+  &= \delta + \phi_1 \, y_{t-1} + \phi_2 \, y_{t-2} + \cdots + \phi_p \, y_{t-p} + w_t  \\
+  &= \delta + w_t + \sum_{i=1}^p \phi_i \, y_{t-i}
+\end{aligned}
+$$
+
+More on these next time.

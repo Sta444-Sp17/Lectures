@@ -1,0 +1,239 @@
+---
+title: "Lecture 4"
+author: "Colin Rundel"
+date: "1/30/2017"
+output: 
+  html_document:
+    fig_height: 4
+---
+
+```{r setup, include=FALSE}
+library(rjags)
+library(modelr)
+library(ggplot2)
+library(dplyr)
+library(shiny)
+library(tidyr)
+library(purrr)
+library(gridExtra)
+```
+
+### Background
+
+Today we'll be looking at data on the presence and absence of the short-finned eel (Anguilla australis) at a number of sites in New Zealand. These data come from Elith, J., Leathwick, J.R., and Hastie, T., 2009. A working guide to boosted regression trees. Journal of Animal Ecology 77: 802-81. 
+
+*Codebook:*
+
+* `presence` - presence or absence of Anguilla australis at the sampling location (0=absent, 1=present)
+* `LocSed` -	weighted average of proportional cover of bed sediment (1=mud, 2=sand, 3=fine gravel, 4=coarse gravel, 5=cobble, 6=boulder, 7=bedrock)
+* `SegSumT` -	Summer air temperature (degrees C) -->
+* `DSDist` - Distance to coast (km)
+* `DSDam` -	Presence of known downstream obstructions, mostly dams
+* `DSMaxSlope` - Maximum downstream slope (degrees)	
+* `USRainDays` - days per month with rain greater than 25 mm
+* `USSlope` - average slope in the upstream catchment (degrees)	
+* `USNative` - area with indigenous forest (proportion)
+* `Method` -	fishing method (`electric`, `net`, `spot`, `trap`, or `mixture`)
+
+```{r}
+load(url("http://www.stat.duke.edu/~cr173/Sta444_Sp17/data/anguilla.Rdata"))
+
+set.seed(20170130)
+
+part = resample_partition(anguilla, c(train=0.75, test=0.25))
+
+anguilla = as.data.frame(part$train)
+anguilla_test = as.data.frame(part$test)
+```
+
+
+### EDA
+
+```{r warning=FALSE, message=FALSE}
+library(GGally)
+
+ggpairs(
+  anguilla %>%
+    mutate(presence = factor(presence),
+           DSDam = factor(DSDam)
+    ),
+  lower = list(continuous = wrap("points", alpha=0.05))
+)
+
+```
+
+
+### Simple GLM
+
+```{r}
+inv_logit = function(x) exp(x)/(1+exp(x))
+
+
+g = glm(presence~SegSumT, family=binomial, data=anguilla)
+#summary(g)
+
+d_g = anguilla %>%
+  mutate(p_hat = predict(g, anguilla, type="response"))
+
+d_g_pred = data.frame(SegSumT = seq(11,25,by=0.1)) %>% 
+  add_predictions(g,"p_hat") %>%
+  mutate(p_hat = inv_logit(p_hat))
+
+ggplot(d_g, aes(x=SegSumT, y=presence)) +
+  geom_jitter(height=0.2, alpha=0.5) +
+  geom_line(data=d_g_pred, aes(y=p_hat), color="red")
+```
+
+#### Residuals
+
+```{r}
+d_g = d_g %>%
+  mutate(resid = presence - p_hat) %>%
+  mutate(p_hat_bin = p_hat - (p_hat %% 0.05))
+
+
+ggplot(d_g, aes(x=SegSumT, y=resid)) +
+  geom_point(alpha=0.3)
+
+d_g %>%
+  group_by(p_hat_bin) %>%
+  summarize(resid_mean = mean(resid)) %>%
+  ggplot(aes(y=resid_mean, x=p_hat_bin)) +
+    geom_point()
+```
+
+#### Pearson Residuals
+
+$$ r_i = \frac{Y_i - E(Y_i)}{Var(Y_i)} = \frac{Y_i - \hat{p}_i}{\hat{p}_i(1-\hat{p}_i)} $$
+
+
+```{r}
+d_g = d_g %>%
+  mutate(pearson = (presence - p_hat) / (p_hat * (1-p_hat)))
+         
+ggplot(d_g, aes(x=SegSumT, y=pearson)) +
+  geom_point(alpha=0.3)   
+
+d_g %>%
+  group_by(p_hat_bin) %>%
+  summarize(pearson_mean = mean(pearson)) %>%
+  ggplot(aes(y=pearson_mean, x=p_hat_bin)) +
+    geom_point()
+```
+
+
+#### Deviance Residuals
+
+$$ d_i = \text{sign}(Y_i-\hat{p_i}) \sqrt{ -2 \left(Y_i \log \hat{p}_i+(1-Y_i)\log (1 - \hat{p}_i) \right) }  $$
+
+```{r}
+
+d_g = d_g %>%
+  mutate(deviance = sign(presence - p_hat) *sqrt(-2 * (presence*log(p_hat) + (1-presence)*log(1 - p_hat) )))
+         
+ggplot(d_g, aes(x=SegSumT, y=deviance)) +
+  geom_point(alpha=0.3)   
+
+d_g %>%
+  group_by(p_hat_bin) %>%
+  summarize(deviance_mean = mean(deviance)) %>%
+  ggplot(aes(y=deviance_mean, x=p_hat_bin)) +
+    geom_point()
+
+```
+
+```{r}
+g
+
+sum(d_g$deviance^2)
+```
+
+
+### Full Model
+
+```{r}
+f = glm(presence~., family=binomial, data=anguilla)
+f
+```
+
+#### Residuals vs fitted
+
+```{r}
+d_f = anguilla %>%
+  mutate(p_hat = predict(f, anguilla, type="response")) %>%
+  mutate(
+    resid = presence - p_hat,
+    pearson = (presence - p_hat) / (p_hat * (1-p_hat)),
+    deviance = sign(presence - p_hat) *sqrt(-2 * (presence*log(p_hat) + (1-presence)*log(1 - p_hat) ))
+  ) %>%
+  mutate(p_hat_bin = p_hat - (p_hat %% 0.05))
+
+d_f_resid = d_f %>%
+  select(p_hat:p_hat_bin) %>%
+  gather(type, value, -p_hat, -p_hat_bin)
+  
+ggplot(d_f_resid, aes(x=p_hat, y=value, color=type)) +
+  geom_point(alpha=0.3) +
+  facet_wrap(~type, ncol=3, scale="free_y")
+
+d_f_resid %>%
+  group_by(type, p_hat_bin) %>%
+  summarize(
+    mean = mean(value)
+  ) %>%
+  ggplot(aes(x=p_hat_bin, y=mean, color=type)) +
+    geom_point() +
+    facet_wrap(~type, ncol=3, scale="free_y")
+  
+```
+
+ 
+#### Residuals vs predictors
+
+```{r}
+ggplot(d_f, aes(x=SegSumT, y=deviance, color=as.factor(presence))) + geom_point()
+
+ggplot(d_f, aes(x=DSMaxSlope, y=deviance, color=as.factor(presence))) + geom_point()
+```
+
+
+### Gradient Boosting model
+
+```{r}
+```
+
+
+
+### Predictive Performance (ROC / AUC)
+
+```{r}
+library(ROCR)
+
+roc = function(d) 
+  prediction(d$p_hat, d$presence) %>% performance(measure = "tpr", x.measure = "fpr") 
+
+auc = function(d) 
+  {prediction(d$p_hat, d$presence) %>% performance(measure = "auc")}@y.values[[1]]
+
+perf_g  = roc(d_g)
+perf_f  = roc(d_f)
+
+
+plot(perf_g, col="#7fc97f", lwd=2)
+plot(perf_f, col="#beaed4",  lwd=2, add=TRUE)
+abline(a=0, b = 1, col="grey")
+
+
+auc(d_g)
+auc(d_f)
+```
+
+
+
+#### Out of sample predictive performance
+
+```{r}
+
+```
+
+

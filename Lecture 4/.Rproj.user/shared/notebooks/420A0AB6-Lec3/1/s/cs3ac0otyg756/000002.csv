@@ -1,0 +1,8 @@
+"0","aids = data_frame("
+"0","  year = 1981:1993,"
+"0","  cases = c(12, 14, 33, 50, 67, 74, 123, 141, 165, 204, 253, 246, 240) %>% as.integer()"
+"0",")"
+"0","aids_base = ggplot(aids, aes(x=year, y=cases)) + "
+"0","  geom_point() +"
+"0","  labs(title=""AIDS cases in Belgium"")"
+"0","print(aids_base)"

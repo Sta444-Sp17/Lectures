@@ -1,0 +1,34 @@
+\frametitle{Auto regressive model}
+
+\[ Y_t = \beta_0 + \beta_1 \text{sales}_t + \beta_2 \text{sales}_{t-12} + \epsilon_t \]
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{aus_wine_ar =}\StringTok{ }\NormalTok{aus_wine }\OperatorTok{%>%}
+\StringTok{  }\KeywordTok{mutate}\NormalTok{(}\DataTypeTok{lag_12 =} \KeywordTok{lag}\NormalTok{(sales, }\DecValTok{12}\NormalTok{))}
+
+\NormalTok{l_ar =}\StringTok{ }\KeywordTok{lm}\NormalTok{(sales}\OperatorTok{~}\NormalTok{date}\OperatorTok{+}\NormalTok{lag_}\DecValTok{12}\NormalTok{, }\DataTypeTok{data=}\NormalTok{aus_wine_ar)}
+\KeywordTok{summary}\NormalTok{(l_ar)}
+\NormalTok{## }
+\NormalTok{## Call:}
+\NormalTok{## lm(formula = sales ~ date + lag_12, data = aus_wine_ar)}
+\NormalTok{## }
+\NormalTok{## Residuals:}
+\NormalTok{##      Min       1Q   Median       3Q      Max }
+\NormalTok{## -12315.1  -1312.0    109.9   1569.7   7036.6 }
+\NormalTok{## }
+\NormalTok{## Coefficients:}
+\NormalTok{##               Estimate Std. Error t value Pr(>|t|)    }
+\NormalTok{## (Intercept)  1.950e+05  1.038e+05   1.879   0.0621 .  }
+\NormalTok{## date        -9.644e+01  5.232e+01  -1.843   0.0672 .  }
+\NormalTok{## lag_12       8.846e-01  3.897e-02  22.698   <2e-16 ***}
+\NormalTok{## ---}
+\NormalTok{## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1}
+\NormalTok{## }
+\NormalTok{## Residual standard error: 2575 on 161 degrees of freedom}
+\NormalTok{##   (12 observations deleted due to missingness)}
+\NormalTok{## Multiple R-squared:  0.7659, Adjusted R-squared:  0.763 }
+\NormalTok{## F-statistic: 263.3 on 2 and 161 DF,  p-value: < 2.2e-16}
+\end{Highlighting}
+\end{Shaded}
+

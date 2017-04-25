@@ -1,0 +1,27 @@
+\frametitle{Detrending}
+
+This time lets definite \(\mu_t = \delta + \mu_{t-1} + \epsilon_t\) and
+detrend by fitting a linear model.
+
+\begin{verbatim}
+##
+## Call:
+## lm(formula = y ~ lag(y, 1), data = rwt)
+##
+## Residuals:
+##     Min      1Q  Median      3Q     Max
+## -3.2286 -0.6574  0.0065  0.6704  3.4503
+##
+## Coefficients:
+##             Estimate Std. Error t value Pr(>|t|)
+## (Intercept)  0.15939    0.08105   1.967   0.0495 *
+## lag(y, 1)    0.99782    0.00191 522.403   <2e-16 ***
+## ---
+## Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+##
+## Residual standard error: 1.041 on 997 degrees of freedom
+##   (1 observation deleted due to missingness)
+## Multiple R-squared:  0.9964, Adjusted R-squared:  0.9964
+## F-statistic: 2.729e+05 on 1 and 997 DF,  p-value: < 2.2e-16
+\end{verbatim}
+
