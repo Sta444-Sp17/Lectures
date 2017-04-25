@@ -1,0 +1,601 @@
+
+---
+title: "Lecture 23" 
+subtitle: "Spatio-temporal Models"
+author: "Colin Rundel"
+date: "04/17/2017"
+fontsize: 11pt
+output: 
+  beamer_presentation:
+    theme: metropolis
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+    fig_caption: false
+    latex_engine: xelatex
+    keep_tex: true
+    includes:
+      in_header: ../settings.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, warning=FALSE, message=FALSE)
+options(width=80)
+
+set.seed(20170417)
+
+library(magrittr)
+library(ggplot2)
+library(tidyr)
+library(rjags)
+library(gridExtra)
+library(purrr)
+library(forcats)
+library(fields)
+library(sf)
+library(raster)
+library(dplyr)
+library(readr)
+library(tibble)
+library(stringr)
+library(lubridate)
+
+theme_set(
+  theme_bw()  
+)
+
+get_coda_parameter = function(coda, pattern)
+{
+  w = coda[[1]] %>% colnames() %>% str_detect(pattern)
+  coda[[1]][,w,drop=FALSE]
+}
+
+post_summary = function(m, ci_width=0.95)
+{
+  d = data_frame(
+    post_mean  = apply(m, 2, mean),
+    post_med   = apply(m, 2, median),
+    post_lower = apply(m, 2, quantile, probs=(1-ci_width)/2),
+    post_upper = apply(m, 2, quantile, probs=1 - (1-ci_width)/2)
+  )
+  
+  if (!is.null(colnames(m)))
+    d = d %>% mutate(param = colnames(m)) %>% dplyr::select(param,post_mean:post_upper)
+  
+  d
+}
+
+strip_attrs = function(obj)
+{
+  attributes(obj) = NULL
+  obj
+}
+
+strip_class = function(obj)
+{
+  attr(obj,"class") = NULL
+  obj
+}
+```
+
+
+# Spatial Models with AR time dependence
+
+## Example - Weather station data
+
+\footnotesize
+
+Based on Andrew Finley and Sudipto Banerjee's notes from [National Ecological Observatory Network (NEON) Applied Bayesian Regression Workshop, March 7 - 8, 2013](http://blue.for.msu.edu/NEON/SC/) [Module 6](http://blue.for.msu.edu/NEON/SC/exercises/exercise-6/initial-exploration-spDynLM.pdf)
+
+`NETemp.dat` - Monthly temperature data (Celsius) recorded across the Northeastern US starting in January 2000.
+
+\scriptoutput
+
+```{r}
+library(spBayes)
+data("NETemp.dat")
+ne_temp = NETemp.dat %>%
+  filter(UTMX > 5.5e6, UTMY > 3e6) %>%
+  select(1:27) %>%
+  tbl_df()
+ne_temp
+```
+
+##
+
+```{r echo=FALSE}
+ne_temp %>%
+  select(1:3,4,7,10,13) %>%
+  gather(month, temp, -(elev:UTMY)) %>%
+  mutate(month = mdy("1/1/2000") + months(str_extract(month, "[0-9]+") %>% as.integer() - 1)  ) %>%
+  ggplot() +
+    geom_point(aes(x=UTMX/1000, y=UTMY/1000, color=temp)) +
+    facet_wrap(~month)
+```
+
+## Dynamic Linear / State Space Models (time)
+
+$$ 
+\begin{aligned}
+{{y}_t} &= \underset{1 \times p}{\bm{F}'_t} ~ \underset{p \times 1}{\bm{\theta}_t} + {{v}_t} 
+&\qquad\qquad\text{observation equation}\\
+\underset{p\times 1}{\bm\theta_t} &= \underset{p \times p}{\bm{G}_t} ~ \underset{p \times 1}{\bm\theta}_{t-1} + \underset{p \times 1}{\bm\omega_t}
+&\qquad\qquad\text{evolution equation}\\
+\end{aligned}
+$$
+
+$$ 
+\begin{aligned}
+\bm{v}_t &\sim \mathcal{N}(0,\bm{V}_t) \\
+\bm\omega_t &\sim \mathcal{N}(0,\bm{W}_t) \\
+\end{aligned}
+$$
+
+## DLM vs ARMA {.t}
+
+ARMA / ARIMA are a special case of a dynamic linear model, for example an $AR(p)$ can be written as
+$$ F_t' = (1, 0, \ldots, 0) $$
+$$ G_t = \begin{pmatrix}
+\phi_1 & \phi_2 & \cdots & \phi_{p-1} & \phi_p \\
+1      & 0      & \cdots & 0          & 0      \\
+0      & 1      & \cdots & 0          & 0      \\
+\vdots & \vdots & \ddots & \vdots     & 0      \\
+0      & 0      & \cdots & 1          & 0      \\
+\end{pmatrix}$$
+$$ \begin{aligned}
+\omega_t &= (\omega_1, 0, \ldots 0), 
+\quad &\omega_1 \sim \mathcal{N}(0,\,\sigma^2)
+\end{aligned}
+$$
+
+. . .
+
+\vspace{2mm}
+
+$$
+\begin{aligned}
+y_t &= \theta_t + v_t,
+  \quad &v_t \sim \mathcal{N}(0,\, \sigma^2_v) \\
+\theta_t &= \sum_{i=1}^p \phi_i\, \theta_{t-i} + \omega_1, 
+  \quad &\omega_1 \sim \mathcal{N}(0,\, \sigma^2_\omega) \\
+\end{aligned}
+$$
+
+
+## Dynamic spatio-temporal models
+
+\vspace{2mm}
+
+The observed temperature at time $t$ and location $s$ is given by $y_t(s)$ where,
+\footnotesize
+$$
+\begin{aligned}
+y_t(\bm{s}) & = \bm{x}_t(\bm{s})\bm{\beta}_t + u_t(\bm{s}) + \epsilon_t(\bm{s}) \\
+\epsilon_t(\bm{s}) &\stackrel{ind.}\sim \mathcal{N}(0,\tau_{t}^2) \\
+\\
+\bm{\beta}_t & = \bm{\beta}_{t-1} + \bm{\eta}_t \\
+\bm{\eta}_t &\stackrel{i.i.d.}\sim \mathcal{N}(0,\bm{\Sigma}_{\eta}) \\
+\\
+u_t(\bm{s}) &= u_{t-1}(\bm{s}) + w_t(\bm{s}) \\
+w_t(\bm{s}) &\stackrel{ind.}{\sim} \mathcal{N}\left(\bm{0}, \Sigma_t(\phi_t, \sigma^2_t)\right)
+\end{aligned}
+$$
+
+\vspace{3mm}
+
+. . .
+
+\normalsize
+Additional assumptions for $t=0$, 
+\footnotesize
+$$\bm\beta_{0} \sim \mathcal{N}(\bm{\mu}_0, \bm{\Sigma}_0)$$
+$$u_{0}(\bm{s}) = 0$$
+
+## Variograms by time
+
+```{r echo=FALSE, message=FALSE}
+library(geoR)
+
+coords = ne_temp %>% select(UTMX, UTMY) %>% as.matrix() / 1000
+
+par(mfrow=c(2,2))
+variog(coords=coords, data=lm(y.1 ~elev,data=ne_temp)$residuals, uvec=seq(0,300, length.out=30), messages=FALSE) %>% 
+  plot(main="Jan 2000", ylim=c(0,5))
+variog(coords=coords, data=lm(y.4 ~elev,data=ne_temp)$residuals, uvec=seq(0,300, length.out=30), messages=FALSE) %>% 
+  plot(main="Apr 2000", ylim=c(0,5))
+variog(coords=coords, data=lm(y.7 ~elev,data=ne_temp)$residuals, uvec=seq(0,300, length.out=30), messages=FALSE) %>% 
+  plot(main="Jul 2000", ylim=c(0,5))
+variog(coords=coords, data=lm(y.10~elev,data=ne_temp)$residuals, uvec=seq(0,300, length.out=30), messages=FALSE) %>% 
+  plot(main="Oct 2000", ylim=c(0,5))
+```
+
+## Data and Model Parameters
+
+**Data*:
+\scriptoutput
+```{r}
+coords = ne_temp %>% select(UTMX, UTMY) %>% as.matrix() / 1000
+y_t = ne_temp %>% select(starts_with("y.")) %>% as.matrix()
+
+max_d = coords %>% dist() %>% max()
+n_t = ncol(y_t)
+n_s = nrow(y_t)
+```
+
+**Parameters*:
+\scriptoutput
+```{r}
+n_beta = 2
+starting = list(
+  beta = rep(0, n_t * n_beta), phi = rep(3/(max_d/2), n_t),
+  sigma.sq = rep(1, n_t), tau.sq = rep(1, n_t), 
+  sigma.eta = diag(0.01, n_beta)
+)
+
+tuning = list(phi = rep(1, n_t))
+
+priors = list(
+  beta.0.Norm = list(rep(0, n_beta), diag(1000, n_beta)), 
+  phi.Unif = list(rep(3/(0.9 * max_d), n_t), rep(3/(0.05 * max_d), n_t)), 
+  sigma.sq.IG = list(rep(2, n_t), rep(2, n_t)), 
+  tau.sq.IG = list(rep(2, n_t), rep(2, n_t)),
+  sigma.eta.IW = list(2, diag(0.001, n_beta))
+)
+```
+
+## Fitting with `spDynLM` from `spBayes`
+
+\scriptoutput
+```{r eval=FALSE}
+n_samples = 10000
+models = lapply(paste0("y.",1:24, "~elev"), as.formula)
+
+m = spDynLM(
+  models, data = ne_temp, coords = coords, get.fitted = TRUE,
+  starting = starting, tuning = tuning, priors = priors,
+  cov.model = "exponential", n.samples = n_samples, n.report = 1000)
+
+save(m, ne_temp, models, coords, starting, tuning, priors, n_samples, 
+     file="dynlm.Rdata")
+
+##  ----------------------------------------
+##  	General model description
+##  ----------------------------------------
+##  Model fit with 34 observations in 24 time steps.
+##  
+##  Number of missing observations 0.
+##  
+##  Number of covariates 2 (including intercept if specified).
+##  
+##  Using the exponential spatial correlation model.
+##  
+##  Number of MCMC samples 10000.
+##
+##  ...
+```
+
+```{r echo=FALSE}
+load(file="dynlm.Rdata")
+```
+
+## Posterior Inference - $\beta$s
+
+\vspace{4mm}
+
+```{r echo=FALSE, fig.height=4}
+betas = m$p.beta.samples %>% 
+  window(start=n_samples/2+1, thin = (n_samples/2)/1000) %>% 
+  post_summary() %>%
+  mutate(
+    month = str_extract(param,"[0-9]+") %>% as.integer(),
+    param = str_extract(param,"\\(.*\\)|elev")
+  )
+
+ggplot(betas, aes(x=month, y=post_mean, color=param)) +
+  geom_point(size=2) +
+  geom_linerange(aes(ymin = post_lower, ymax = post_upper)) +
+  facet_wrap(~param, scale="free_y")
+```
+
+\vvfill
+
+\scriptsize
+
+[Lapse Rate](https://en.wikipedia.org/wiki/Lapse_rate)
+
+
+## Posterior Inference - $\theta$
+
+\vspace{4mm}
+
+```{r echo=FALSE, fig.height=4}
+theta = m$p.theta.samples %>% 
+  window(start=n_samples/2+1, thin = (n_samples/2)/1000) %>% 
+  post_summary() %>%
+  mutate(
+    month = str_extract(param,"[0-9]+") %>% as.integer(),
+    param = str_extract(param,"sigma\\.sq|tau\\.sq|phi")
+  )
+eff_range = theta %>% 
+  filter(param == "phi") %>%
+  mutate(
+    param = "Eff. Range",
+    post_mean = 3/post_mean,
+    post_med = NA,
+    tmp = post_lower,
+    post_lower = 3/post_upper,
+    post_upper = 3/tmp,
+    tmp = NULL
+  )
+
+theta = rbind(theta, eff_range)
+
+ggplot(theta, aes(x=month, y=post_mean, color=param)) +
+  geom_point(size=2) +
+  geom_linerange(aes(ymin = post_lower, ymax = post_upper)) +
+  facet_wrap(~param, scale="free_y", nrow=3)
+```
+
+
+## Posterior Inference - Observed vs. Predicted
+
+\vspace{4mm}
+
+```{r echo=FALSE, fig.height=5, fig.width=7, fig.align="center",out.width="\\textwidth"}
+loc_month = expand.grid(s=1:nrow(ne_temp), month=1:24)
+
+y_hat = m$p.y.samples %>% 
+  t() %>% as.mcmc() %>%
+  window(start=n_samples/2+1, thin = (n_samples/2)/1000) %>% 
+  post_summary() %>%
+  cbind(loc_month) %>%
+  mutate(y_obs = y_t[loc_month %>% as.matrix()])
+
+ggplot(y_hat, aes(x=y_obs, y=post_mean)) +
+  geom_point(size=1, alpha=0.5) +
+  ylab("y_hat") +
+  #geom_linerange(data=sample_frac(y_hat,0.1), aes(ymin = post_lower, ymax = post_upper), alpha=0.5) +
+  geom_abline(slope = 1, intercept=0, color="red", alpha=0.2, size=2) +
+  ylim(-20,25) + xlim(-20,25)
+```
+
+## Prediction
+
+`spPredict` does not support `spDynLM` objects.
+
+```{r}
+r = raster(xmn=575e4, xmx=630e4, ymn=300e4, ymx=355e4, nrow=20, ncol=20)
+
+pred = xyFromCell(r, 1:length(r)) %>% 
+  cbind(elev=0, ., matrix(NA, nrow=length(r), ncol=24)) %>%
+  as.data.frame() %>%
+  setNames(names(ne_temp)) %>%
+  rbind(ne_temp, .) %>%
+  select(1:15) %>%
+  select(-elev)
+```  
+
+```{r echo=FALSE}
+coords_pred = pred %>% select(UTMX, UTMY) %>% as.matrix()
+y_t_pred = pred %>% select(starts_with("y.")) %>% as.matrix()
+
+n_t = ncol(y_t_pred)
+n_s = nrow(y_t_pred)
+
+n_beta = 1
+starting = list(
+  beta = rep(0, n_t * n_beta), phi = rep(3/(max_d/2), n_t),
+  sigma.sq = rep(1, n_t), tau.sq = rep(1, n_t), 
+  sigma.eta = diag(0.01, n_beta)
+)
+
+tuning = list(phi = rep(1, n_t))
+
+priors = list(
+  beta.0.Norm = list(rep(0, n_beta), diag(1000, n_beta)), 
+  phi.Unif = list(rep(3/(0.9 * max_d), n_t), rep(3/(0.05 * max_d), n_t)), 
+  sigma.sq.IG = list(rep(2, n_t), rep(2, n_t)), 
+  tau.sq.IG = list(rep(2, n_t), rep(2, n_t)),
+  sigma.eta.IW = list(2, diag(0.001, n_beta))
+)
+```
+
+```{r eval=FALSE}
+models_pred = lapply(paste0("y.",1:n_t, "~1"), as.formula)
+
+n_samples = 5000
+m_pred = spDynLM(
+  models_pred, data = pred, coords = coords_pred, get.fitted = TRUE,
+  starting = starting, tuning = tuning, priors = priors,
+  cov.model = "exponential", n.samples = n_samples, n.report = 1000)
+
+save(m_pred, pred, models_pred, coords_pred, y_t_pred, n_samples, 
+     file="dynlm_pred.Rdata")
+```
+
+```{r echo=FALSE}
+load("dynlm_pred.Rdata")
+```
+
+
+## 
+
+```{r echo=FALSE}
+loc_month = expand.grid(s=1:434, month=1:12)
+
+y_hat_pred = m_pred$p.y.samples %>% 
+  t() %>% as.mcmc() %>%
+  window(start=n_samples/2+1, thin = 5) %>% 
+  post_summary() %>%
+  cbind(loc_month) %>%
+  mutate(y_obs = y_t_pred[loc_month %>% as.matrix()]) %>%
+  mutate(utmx = coords_pred[s,1],
+         utmy = coords_pred[s,2])
+
+ggplot(y_hat_pred) +
+  geom_point(aes(y=post_mean, x=y_obs)) +
+  geom_abline(slope = 1, intercept=0, color="red", alpha=0.2, size=2) +
+  ylim(-15,20) + xlim(-15,20)
+```
+
+##
+
+```{r echo=FALSE, fig.width=6, fig.align="center", out.width="0.8\\textwidth"}
+r_m1 = r
+r_m1[] = y_hat_pred %>% filter(s > 34, month==1) %>% .$post_mean
+
+r_m4 = r
+r_m4[] = y_hat_pred %>% filter(s > 34, month==4) %>% .$post_mean
+
+r_m7 = r
+r_m7[] = y_hat_pred %>% filter(s > 34, month==7) %>% .$post_mean
+
+r_m10 = r
+r_m10[] = y_hat_pred %>% filter(s > 34, month==10) %>% .$post_mean
+
+
+par(mfrow=c(2,2), mar=c(1,1,3,4))
+plot(r_m1, main="Jan 2000", axes=FALSE, asp=FALSE); points(coords*1000, pch=16)
+plot(r_m4, main="Apr 2000", axes=FALSE, asp=FALSE); points(coords*1000, pch=16)
+plot(r_m7, main="Jul 2000", axes=FALSE, asp=FALSE); points(coords*1000, pch=16)
+plot(r_m10, main="Oct 2000", axes=FALSE, asp=FALSE); points(coords*1000, pch=16)
+```
+
+# Spatio-temporal models for continuous time
+
+## Additive Models {.t}
+
+In general, spatiotemporal models will have a form like the following,
+
+$$ \begin{aligned}
+y(\bm{s},{t}) 
+  &= \underset{\text{mean structure}}{\mu(\bm{s},{t})} + \underset{\text{error structure}}{{e}(\bm{s},{t})} \\
+  &= \underset{\text{Regression}}{\bm{x}(\bm{s},{t}) \, \bm{\beta}(\bm{s},{t})} + \underset{\text{Spatiotemporal RE}}{{w}(\bm{s},{t})} + \underset{\text{Error}}{\epsilon(\bm{s},{t})}
+\end{aligned} $$
+
+. . .
+
+\vspace{5mm}
+
+The simplest possible spatiotemporal model is one were assume there is no dependence between observations in space and time,
+
+$$
+w(\bm{s},t) = \alpha(t) + \omega(\bm{s})
+$$
+
+these are straight forward to fit and interpret but are quite limiting (no shared information between space and time).
+
+
+## Spatiotemporal Covariance
+
+Lets assume that we want to define our spatiotemporal random effect to be a single stationary Gaussian Process (in 3 dimensions$^\star$),
+$$ \bm{w}(\bm{s},\bm{t}) \sim \mathcal{N}\big(\bm{0}, \bm\Sigma(\bm{s},\bm{t})\big) $$
+where our covariance function depends on both $\lVert s-s'\rVert$ and $\lvert t-t'\rvert$,
+$$
+\text{cov}(\bm{w}(\bm{s},\bm{t}), \bm{w}(\bm{s}',\bm{t}')) = c(\lVert s-s'\rVert, \lvert t-t'\rvert)
+$$
+
+* Note that the resulting covariance matrix $\Sigma$ will be of size $n_s \cdot n_t \times n_s \cdot n_t$.
+
+    + Even for modest problems this gets very large (past the point of direct computability).
+
+    + If $n_t = 52$ and $n_s = 100$ we have to work with a $5200 \times 5200$ covariance matrix
+
+
+## Separable Models
+
+One solution is to use a seperable form, where the covariance is the product of a valid 2d spatial and a valid 1d temporal covariance / correlation function,
+$$
+\text{cov}(\bm{w}(\bm{s},\bm{t}), \bm{w}(\bm{s}',\bm{t}')) = \sigma^2 \, \rho_1(\lVert \bm{s}-\bm{s}'\rVert;\bm\theta) \, \rho_2(\lvert \bm{t}-\bm{t}' \rvert; \bm{\phi})
+$$
+
+. . .
+
+If we define our observations as follows (stacking time locations within spatial locations)
+\scriptsize
+$$
+\bm{w}^t_{\bm{s}} = \big(
+  w(s_1,t_1)     ,\, \cdots ,\, w(s_1,t_{n_t}) ,\,
+  w(s_2,t_1)     ,\, \cdots ,\, w(s_2,t_{n_t}) ,\, \cdots ,\, \cdots ,\,
+  w(s_{n_s},t_1) ,\, \cdots ,\, w(s_{n_s},t_{n_t}) \big)
+$$
+\normalsize
+then the covariance can be written as
+$$
+\bm\Sigma_w(\sigma^2, \theta, \phi) = \sigma^2 \, \bm{H}_s(\theta) \otimes \bm{H}_t(\phi)
+$$
+where $\bm{H}_s(\theta)$ and $\bm{H}_t(\theta)$ are $n_s \times n_s$ and $n_t \times n_t$ sized correlation matrices respectively and their elements are defined by
+\footnotesize
+$$\begin{aligned}
+\{\bm{H}_s(\theta)\}_{ij} &= \rho_1(\lVert \bm{s}_i - \bm{s}_j \rVert; \theta) \\
+\{\bm{H}_t(\phi)\}_{ij} &= \rho_1(\lvert t_i - t_j \rvert; \phi) \\
+\end{aligned}$$
+
+
+## Kronecker Product
+
+Definition:
+$$\begin{aligned}
+\underset{[m \times n]}{\bm{A}} \otimes \underset{[p \times q]}{\bm{B}} = \underset{[m \cdot p \times  n \cdot q]}{\begin{pmatrix}
+a_{11} \bm{B} & \cdots & a_{1n} \bm{B} \\
+\vdots        & \ddots & \vdots        \\
+a_{m1} \bm{B} & \cdots & a_{mn} \bm{B} \\
+\end{pmatrix}}
+\end{aligned}$$
+
+\vspace{4mm}
+
+. . .
+
+Properties:
+$$\begin{aligned}
+\bm{A} \otimes \bm{B}       &\ne \bm{B} \otimes \bm{A}  \qquad\text{(usually)} \\
+\vspace{3mm}
+(\bm{A} \otimes \bm{B})^t   &= \bm{A}^t \otimes \bm{B}^t \\
+\vspace{3mm}
+\det(\bm{A} \otimes \bm{B}) &= \det(\bm{B} \otimes \bm{A}) \\
+&=\det(\bm{A})^{\text{rank}(\bm{B})} \det(\bm{B})^{\text{rank}(\bm{A})} \\
+\vspace{3mm}
+(\bm{A} \otimes \bm{B})^{-1} &= \bm{A}^{-1} \bm{B}^{-1}
+\end{aligned}$$
+
+
+
+## Kronecker Product and MVN Likelihoods
+
+If we have a spatiotemporal random effect with a separable form,
+$$
+\bm{w}(\bm{s},\bm{t}) \sim \mathcal{N}(\bm{0},\, \bm\Sigma_w)
+$$
+$$
+\bm\Sigma_w = \sigma^2 \, \bm{H}_s \otimes \bm{H}_t
+$$
+
+then the likelihood for $\bm{w}$ is given by
+
+$$
+-\frac{n}{2}\log 2\pi - \frac{1}{2} \log |\Sigma_w| - \frac{1}{2} \bm{w}^t \bm{\Sigma_w}^{-1} \bm{w}
+$$
+$$
+= -\frac{n}{2}\log 2\pi - \frac{1}{2} \log \left[ (\sigma^2)^{n_t \cdot n_s} |H_s|^{n_t} |H_t|^{n_s}\right] - \frac{1}{2} \bm{w}^t \frac{1}{\sigma^2}(\bm{H}_s^{-1} \otimes \bm{H}_t^{-1}) \bm{w}
+$$
+
+## Non-seperable Models {.t}
+
+* Additive and separable models are still somewhat limiting
+
+\vspace{2mm}
+
+* Cannot treat spatiotemporal covariances as 3d observations
+
+\vspace{2mm}
+
+* Possible alternatives:
+
+    + Specialized spatiotemporal covariance functions, i.e.
+$$ 
+c(\bm{s}-\bm{s}', t-t') 
+= \sigma^2 (\lvert t - t'\rvert+1)^{-1} \exp\big(-\lVert\bm{s}-\bm{s}'\rVert (\lvert t-t' \rvert + 1)^{-\beta/2}\big)
+$$
+$$ ~ $$
+    + Mixtures, i.e. $w(\bm{s},t) = w_1(\bm{s},t) + w_2(\bm{s},t)$, where $w_1(\bm{s},t)$ and $w_2(\bm{s},t)$ have seperable forms.
